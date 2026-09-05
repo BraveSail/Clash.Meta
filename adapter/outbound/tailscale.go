@@ -6,16 +6,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
+	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface/anet"
+	"github.com/metacubex/mihomo/component/keepalive"
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/log"
@@ -23,9 +29,12 @@ import (
 	"github.com/metacubex/tailscale/envknob"
 	"github.com/metacubex/tailscale/hostinfo"
 	"github.com/metacubex/tailscale/ipn"
+	"github.com/metacubex/tailscale/ipn/ipnstate"
 	"github.com/metacubex/tailscale/net/netmon"
 	"github.com/metacubex/tailscale/tailcfg"
 	"github.com/metacubex/tailscale/tsnet"
+	"github.com/metacubex/tailscale/types/netmap"
+	"github.com/metacubex/tailscale/types/nettype"
 	D "github.com/miekg/dns"
 	"github.com/samber/lo"
 )
@@ -46,22 +55,247 @@ type Tailscale struct {
 
 	serverStarted bool
 
+	hostForward           *tailscaleHostForwarder
+	kernelHostForward     *tailscaleKernelHostForwarder
+	unregisterHostForward []func()
 	unregisterDNSResolver func()
+	magicDNSDirect        *tailscaleMagicDNSDirectResolver
 }
 
 type TailscaleOption struct {
 	BasicOption
-	Name       string `proxy:"name"`
-	Hostname   string `proxy:"hostname,omitempty"`
-	AuthKey    string `proxy:"auth-key,omitempty"`
-	ControlURL string `proxy:"control-url,omitempty"`
-	StateDir   string `proxy:"state-dir,omitempty"`
-	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
-	UDP        bool   `proxy:"udp,omitempty"`
+	Name           string                        `proxy:"name"`
+	Hostname       string                        `proxy:"hostname,omitempty"`
+	AuthKey        string                        `proxy:"auth-key,omitempty"`
+	ControlURL     string                        `proxy:"control-url,omitempty"`
+	StateDir       string                        `proxy:"state-dir,omitempty"`
+	Ephemeral      bool                          `proxy:"ephemeral,omitempty"`
+	UDP            bool                          `proxy:"udp,omitempty"`
+	MagicDNS       bool                          `proxy:"magic-dns,omitempty"`
+	MagicDNSDirect TailscaleMagicDNSDirectOption `proxy:"magic-dns-direct,omitempty"`
+	HostForward    TailscaleHostForwardOption    `proxy:"host-forward,omitempty"`
 
 	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
 	ExitNode               string `proxy:"exit-node,omitempty"`
 	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
+}
+
+type TailscaleHostForwardOption struct {
+	Enabled bool   `proxy:"enabled,omitempty"`
+	Mode    string `proxy:"mode,omitempty"`
+	Target  string `proxy:"target,omitempty"`
+	TCP     *bool  `proxy:"tcp,omitempty"`
+	UDP     *bool  `proxy:"udp,omitempty"`
+	Device  string `proxy:"device,omitempty"`
+	MTU     uint32 `proxy:"mtu,omitempty"`
+}
+
+type TailscaleMagicDNSDirectOption struct {
+	Enabled      bool     `proxy:"enabled,omitempty"`
+	Interfaces   []string `proxy:"interfaces,omitempty"`
+	ProbeTimeout int      `proxy:"probe-timeout,omitempty"`
+	CacheTTL     int      `proxy:"cache-ttl,omitempty"`
+	AnswerTTL    int      `proxy:"answer-ttl,omitempty"`
+}
+
+const (
+	tailscaleHostForwardModeUserspace = "userspace"
+	tailscaleHostForwardModeKernel    = "kernel"
+
+	tailscaleHostForwardUDPIdleTimeout               = 2 * time.Minute
+	tailscaleHostForwardNetstackKeepaliveIdleEnv     = "TS_NETSTACK_KEEPALIVE_IDLE"
+	tailscaleHostForwardNetstackKeepaliveIdle        = "60s"
+	tailscaleHostForwardNetstackKeepaliveIntervalEnv = "TS_NETSTACK_KEEPALIVE_INTERVAL"
+	tailscaleHostForwardNetstackKeepaliveInterval    = "15s"
+)
+
+var tailscaleHostForwardDefaultTarget = netip.MustParseAddr("127.0.0.1")
+
+func tailscaleHostForwardMode(option TailscaleHostForwardOption) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(option.Mode))
+	if mode == "" {
+		return tailscaleHostForwardModeUserspace, nil
+	}
+	switch mode {
+	case tailscaleHostForwardModeUserspace, tailscaleHostForwardModeKernel:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported tailscale host-forward mode %q", option.Mode)
+	}
+}
+
+type tailscaleHostForwarder struct {
+	ctx         context.Context
+	name        string
+	target      netip.Addr
+	tcp         bool
+	udp         bool
+	tailscaleIP func() (netip.Addr, netip.Addr)
+	dialContext func(context.Context, string, string) (net.Conn, error)
+}
+
+func newTailscaleHostForwarder(
+	ctx context.Context,
+	name string,
+	option TailscaleHostForwardOption,
+	tailscaleIP func() (netip.Addr, netip.Addr),
+) (*tailscaleHostForwarder, error) {
+	if !option.Enabled {
+		return nil, nil
+	}
+
+	target := option.Target
+	if target == "" {
+		target = tailscaleHostForwardDefaultTarget.String()
+	}
+	targetIP, err := netip.ParseAddr(target)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tailscale host-forward target %q: %w", target, err)
+	}
+	targetIP = targetIP.Unmap()
+	if !targetIP.IsLoopback() {
+		return nil, fmt.Errorf("tailscale host-forward target must be a loopback address: %s", targetIP)
+	}
+
+	tcpEnabled := option.TCP == nil || *option.TCP
+	udpEnabled := option.UDP == nil || *option.UDP
+	if !tcpEnabled && !udpEnabled {
+		return nil, errors.New("tailscale host-forward requires tcp or udp")
+	}
+
+	dialer := &net.Dialer{}
+	keepalive.SetNetDialer(dialer)
+	return &tailscaleHostForwarder{
+		ctx:         ctx,
+		name:        name,
+		target:      targetIP,
+		tcp:         tcpEnabled,
+		udp:         udpEnabled,
+		tailscaleIP: tailscaleIP,
+		dialContext: dialer.DialContext,
+	}, nil
+}
+
+func (f *tailscaleHostForwarder) accepts(dst netip.AddrPort) bool {
+	dstAddr := dst.Addr().Unmap()
+	v4, v6 := f.tailscaleIP()
+	return (v4.IsValid() && dstAddr == v4.Unmap()) || (v6.IsValid() && dstAddr == v6.Unmap())
+}
+
+func (f *tailscaleHostForwarder) targetAddress(dst netip.AddrPort) string {
+	return netip.AddrPortFrom(f.target, dst.Port()).String()
+}
+
+func (f *tailscaleHostForwarder) handleTCP(src, dst netip.AddrPort) (func(net.Conn), bool) {
+	if !f.tcp || !f.accepts(dst) {
+		return nil, false
+	}
+	target := f.targetAddress(dst)
+	return func(client net.Conn) {
+		keepalive.TCPKeepAlive(client)
+		backend, err := f.dialContext(f.ctx, "tcp", target)
+		if err != nil {
+			log.Debugln("[Tailscale](%s) host-forward TCP %s -> %s failed: %v", f.name, src, target, err)
+			_ = client.Close()
+			return
+		}
+		keepalive.TCPKeepAlive(backend)
+		log.Debugln("[Tailscale](%s) host-forward TCP %s -> %s", f.name, src, target)
+		N.Relay(client, backend)
+	}, true
+}
+
+func configureTailscaleHostForwardNetstackKeepalive() {
+	setTailscaleEnvDefault(tailscaleHostForwardNetstackKeepaliveIdleEnv, tailscaleHostForwardNetstackKeepaliveIdle)
+	setTailscaleEnvDefault(tailscaleHostForwardNetstackKeepaliveIntervalEnv, tailscaleHostForwardNetstackKeepaliveInterval)
+}
+
+func setTailscaleEnvDefault(name, value string) {
+	if os.Getenv(name) != "" {
+		return
+	}
+	envknob.Setenv(name, value)
+}
+
+func (f *tailscaleHostForwarder) handleUDP(src, dst netip.AddrPort) (func(nettype.ConnPacketConn), bool) {
+	if !f.udp || !f.accepts(dst) {
+		return nil, false
+	}
+	target := f.targetAddress(dst)
+	return func(client nettype.ConnPacketConn) {
+		backend, err := f.dialContext(f.ctx, "udp", target)
+		if err != nil {
+			log.Debugln("[Tailscale](%s) host-forward UDP %s -> %s failed: %v", f.name, src, target, err)
+			_ = client.Close()
+			return
+		}
+		log.Debugln("[Tailscale](%s) host-forward UDP %s -> %s", f.name, src, target)
+		_ = relayTailscaleHostUDP(f.ctx, client, backend, tailscaleHostForwardUDPIdleTimeout)
+	}, true
+}
+
+func relayTailscaleHostUDP(ctx context.Context, client nettype.ConnPacketConn, backend net.Conn, idleTimeout time.Duration) error {
+	refreshDeadline := func() {
+		deadline := time.Now().Add(idleTimeout)
+		_ = client.SetDeadline(deadline)
+		_ = backend.SetDeadline(deadline)
+	}
+	refreshDeadline()
+
+	copyClientToBackend := func() error {
+		buffer := make([]byte, 64*1024)
+		for {
+			n, _, err := client.ReadFrom(buffer)
+			if err != nil {
+				return err
+			}
+			written, err := backend.Write(buffer[:n])
+			if err != nil {
+				return err
+			}
+			if written != n {
+				return io.ErrShortWrite
+			}
+			refreshDeadline()
+		}
+	}
+	copyBackendToClient := func() error {
+		buffer := make([]byte, 64*1024)
+		for {
+			n, err := backend.Read(buffer)
+			if err != nil {
+				return err
+			}
+			written, err := client.Write(buffer[:n])
+			if err != nil {
+				return err
+			}
+			if written != n {
+				return io.ErrShortWrite
+			}
+			refreshDeadline()
+		}
+	}
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- copyClientToBackend() }()
+	go func() { errCh <- copyBackendToClient() }()
+
+	completed := 0
+	var firstErr error
+	select {
+	case firstErr = <-errCh:
+		completed = 1
+	case <-ctx.Done():
+		firstErr = ctx.Err()
+	}
+	_ = client.Close()
+	_ = backend.Close()
+	for completed < 2 {
+		<-errCh
+		completed++
+	}
+	return firstErr
 }
 
 func init() {
@@ -112,6 +346,17 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	if _, err := buildTailscaleMaskedPrefs(option); err != nil {
 		return nil, err
 	}
+	if option.MagicDNSDirect.Enabled && !option.MagicDNS {
+		return nil, errors.New("tailscale magic-dns-direct requires magic-dns")
+	}
+	hostForwardMode := tailscaleHostForwardModeUserspace
+	if option.HostForward.Enabled {
+		var err error
+		hostForwardMode, err = tailscaleHostForwardMode(option.HostForward)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if option.StateDir == "" {
 		option.StateDir = "tailscale"
 	}
@@ -142,6 +387,22 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		backendInitCh: make(chan struct{}),
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
+	if option.MagicDNSDirect.Enabled {
+		magicDNSDirect, err := newTailscaleMagicDNSDirectResolver(outbound, option.MagicDNSDirect)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		outbound.magicDNSDirect = magicDNSDirect
+	}
+	if option.HostForward.Enabled && hostForwardMode == tailscaleHostForwardModeKernel {
+		kernelHostForward, err := newTailscaleKernelHostForwarder(option.Name, option.HostForward)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		outbound.kernelHostForward = kernelHostForward
+	}
 	outbound.server = &tsnet.Server{
 		Dir:        option.StateDir,
 		Hostname:   option.Hostname,
@@ -174,9 +435,55 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 			log.Debugln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))
 		},
 	}
-	dnsTransport := tailscaleDNSTransport{tailscale: outbound}
-	outbound.dnsResolver = dns.NewResolverFromClient(dnsTransport)
-	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, dnsTransport)
+	if outbound.kernelHostForward != nil {
+		outbound.server.Tun = outbound.kernelHostForward.Device()
+	}
+	var hostForward *tailscaleHostForwarder
+	var err error
+	if option.HostForward.Enabled && hostForwardMode == tailscaleHostForwardModeUserspace {
+		hostForward, err = newTailscaleHostForwarder(ctx, option.Name, option.HostForward, outbound.server.TailscaleIPs)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+	}
+	outbound.hostForward = hostForward
+	if hostForward != nil {
+		configureTailscaleHostForwardNetstackKeepalive()
+	}
+	tailnetDNSTransport := tailscaleDNSTransport{tailscale: outbound}
+	outbound.dnsResolver = dns.NewResolverFromClient(tailnetDNSTransport)
+	outbound.unregisterDNSResolver = dns.RegisterTailscaleDnsClient(option.Name, tailscaleDNSTransport{
+		tailscale:   outbound,
+		allowDirect: true,
+	})
+	if hostForward != nil || outbound.kernelHostForward != nil || option.MagicDNS {
+		if hostForward != nil {
+			if hostForward.tcp {
+				outbound.unregisterHostForward = append(outbound.unregisterHostForward, outbound.server.RegisterFallbackTCPHandler(hostForward.handleTCP))
+			}
+			if hostForward.udp {
+				outbound.unregisterHostForward = append(outbound.unregisterHostForward, outbound.server.RegisterFallbackUDPHandler(hostForward.handleUDP))
+			}
+		}
+		if err := outbound.start(); err != nil {
+			_ = outbound.Close()
+			return nil, fmt.Errorf("start tailscale proxy: %w", err)
+		}
+	}
+	if hostForward != nil {
+		log.Infoln("[Tailscale](%s) host-forward enabled: tcp=%v udp=%v target=%s", option.Name, hostForward.tcp, hostForward.udp, hostForward.target)
+		log.Infoln("[Tailscale](%s) host-forward netstack TCP keepalive: idle=%s interval=%s", option.Name, os.Getenv(tailscaleHostForwardNetstackKeepaliveIdleEnv), os.Getenv(tailscaleHostForwardNetstackKeepaliveIntervalEnv))
+	}
+	if outbound.kernelHostForward != nil {
+		log.Infoln("[Tailscale](%s) host-forward kernel mode enabled: device=%s mtu=%d batch-size=%d routes=%v", option.Name, outbound.kernelHostForward.Name(), outbound.kernelHostForward.MTU(), outbound.kernelHostForward.Device().BatchSize(), outbound.kernelHostForward.Routes())
+	}
+	if option.MagicDNS {
+		log.Infoln("[Tailscale](%s) MagicDNS integration enabled", option.Name)
+	}
+	if outbound.magicDNSDirect != nil {
+		log.Infoln("[Tailscale](%s) MagicDNS LAN-direct enabled: interfaces=%v probe-timeout=%s cache-ttl=%s answer-ttl=%ds", option.Name, outbound.magicDNSDirect.interfaceNames(), outbound.magicDNSDirect.probeTimeout, outbound.magicDNSDirect.cacheTTL, outbound.magicDNSDirect.answerTTL)
+	}
 	return outbound, nil
 }
 
@@ -213,7 +520,11 @@ func (t *Tailscale) watchBackendState() {
 		t.setBackendInitialized(err)
 		return
 	}
-	watcher, err := lc.WatchIPNBus(t.ctx, ipn.NotifyInitialState)
+	watchMask := ipn.NotifyInitialState
+	if t.option.MagicDNS {
+		watchMask |= ipn.NotifyInitialNetMap
+	}
+	watcher, err := lc.WatchIPNBus(t.ctx, watchMask)
 	if err != nil {
 		t.setBackendInitialized(err)
 		return
@@ -221,6 +532,7 @@ func (t *Tailscale) watchBackendState() {
 	defer watcher.Close()
 
 	backendInitialized := false
+	kernelHostForwardConfigured := t.kernelHostForward == nil
 	exitNodeNeedsStatus := tailscaleExitNodeNeedsStatus(t.option)
 	for {
 		n, err := watcher.Next()
@@ -229,23 +541,179 @@ func (t *Tailscale) watchBackendState() {
 			return
 		}
 		if n.State == nil {
+			if t.option.MagicDNS && n.NetMap != nil {
+				t.publishMagicDNSState(n.NetMap)
+			}
 			continue
 		}
+		if t.option.MagicDNS && n.NetMap != nil {
+			t.publishMagicDNSState(n.NetMap)
+		}
 
+		if !kernelHostForwardConfigured && *n.State == ipn.Running {
+			v4, v6 := t.server.TailscaleIPs()
+			if err := t.kernelHostForward.Configure(v4, v6); err != nil {
+				t.setBackendInitialized(err)
+				log.Warnln("[Tailscale](%s) configure kernel host-forward failed: %v", t.Name(), err)
+				return
+			}
+			kernelHostForwardConfigured = true
+			log.Infoln("[Tailscale](%s) host-forward kernel interface configured: device=%s ips=%v routes=%v", t.Name(), t.kernelHostForward.Name(), t.kernelHostForward.Addresses(), t.kernelHostForward.Routes())
+		}
 		if *n.State != ipn.NoState && !backendInitialized {
 			t.setBackendInitialized(nil)
 			backendInitialized = true
-			if !exitNodeNeedsStatus {
-				return
-			}
+		}
+		if backendInitialized && !exitNodeNeedsStatus && !t.option.MagicDNS && kernelHostForwardConfigured {
+			return
 		}
 		if exitNodeNeedsStatus && *n.State == ipn.Running {
 			if err := t.applyExitNodePrefs(t.ctx); err != nil {
 				log.Warnln("[Tailscale](%s) set exit node failed: %v", t.Name(), err)
 			}
-			return
+			if !t.option.MagicDNS {
+				return
+			}
+			exitNodeNeedsStatus = false
 		}
 	}
+}
+
+func (t *Tailscale) publishMagicDNSState(nm *netmap.NetworkMap) {
+	t.publishMagicDNSSearchDomains(nm)
+	if t.magicDNSDirect != nil {
+		t.magicDNSDirect.updateNetMap(nm)
+	}
+}
+
+func (t *Tailscale) publishMagicDNSSearchDomains(nm *netmap.NetworkMap) {
+	domains := tailscaleMagicDNSSearchDomains(nm)
+	if len(domains) == 0 {
+		return
+	}
+	tailnet.SetSearchDomains(t.Name(), domains)
+	log.Debugln("[Tailscale](%s) MagicDNS search domains: %v", t.Name(), domains)
+}
+
+func tailscaleMagicDNSSearchDomains(nm *netmap.NetworkMap) []string {
+	if nm == nil {
+		return nil
+	}
+	domains := append([]string{}, nm.DNS.Domains...)
+	if nm.DNS.Proxied {
+		domains = append(domains, nm.MagicDNSSuffix())
+	}
+	return tailnet.NormalizeSearchDomains(domains)
+}
+
+func (t *Tailscale) TailnetStatus(ctx context.Context) (tailnet.Status, error) {
+	if err := t.ensureStarted(ctx); err != nil {
+		return tailnet.Status{Proxy: t.Name()}, err
+	}
+	lc, err := t.server.LocalClient()
+	if err != nil {
+		return tailnet.Status{Proxy: t.Name()}, err
+	}
+	status, err := lc.Status(ctx)
+	if err != nil {
+		return tailnet.Status{Proxy: t.Name()}, err
+	}
+	return tailscaleStatusFromIPN(t.Name(), status), nil
+}
+
+func tailscaleStatusFromIPN(proxyName string, status *ipnstate.Status) tailnet.Status {
+	result := tailnet.Status{
+		Proxy: proxyName,
+		Peers: []tailnet.NodeStatus{},
+	}
+	if status == nil {
+		return result
+	}
+
+	result.BackendState = status.BackendState
+	result.TailscaleIPs = tailscaleAddrsToStrings(status.TailscaleIPs)
+	if status.CurrentTailnet != nil {
+		result.MagicDNSSuffix = status.CurrentTailnet.MagicDNSSuffix
+		result.MagicDNSEnabled = status.CurrentTailnet.MagicDNSEnabled
+	} else {
+		result.MagicDNSSuffix = status.MagicDNSSuffix
+	}
+
+	if status.Self != nil {
+		self := tailscalePeerStatusToNode(status.Self, result.MagicDNSSuffix, true)
+		if !self.Online && status.BackendState == ipn.Running.String() {
+			self.Online = true
+		}
+		result.Self = &self
+	}
+
+	for _, key := range status.Peers() {
+		peer := status.Peer[key]
+		if peer == nil {
+			continue
+		}
+		result.Peers = append(result.Peers, tailscalePeerStatusToNode(peer, result.MagicDNSSuffix, false))
+	}
+	return result
+}
+
+func tailscalePeerStatusToNode(peer *ipnstate.PeerStatus, magicDNSSuffix string, self bool) tailnet.NodeStatus {
+	node := tailnet.NodeStatus{
+		HostName:       peer.HostName,
+		DNSName:        peer.DNSName,
+		OS:             peer.OS,
+		TailscaleIPs:   tailscaleAddrsToStrings(peer.TailscaleIPs),
+		Online:         peer.Online,
+		Active:         peer.Active,
+		Relay:          peer.Relay,
+		Addrs:          append([]string{}, peer.Addrs...),
+		CurAddr:        peer.CurAddr,
+		PeerRelay:      peer.PeerRelay,
+		ExitNode:       peer.ExitNode,
+		ExitNodeOption: peer.ExitNodeOption,
+		TxBytes:        peer.TxBytes,
+		RxBytes:        peer.RxBytes,
+		Self:           self,
+	}
+	if !peer.LastSeen.IsZero() {
+		lastSeen := peer.LastSeen
+		node.LastSeen = &lastSeen
+	}
+	node.Name = tailscalePeerDisplayName(node, magicDNSSuffix)
+	return node
+}
+
+func tailscalePeerDisplayName(node tailnet.NodeStatus, magicDNSSuffix string) string {
+	dnsName := strings.TrimRight(node.DNSName, ".")
+	suffix := strings.TrimRight(magicDNSSuffix, ".")
+	if dnsName != "" && suffix != "" {
+		if dnsName == suffix {
+			return dnsName
+		}
+		if name, ok := strings.CutSuffix(dnsName, "."+suffix); ok && name != "" {
+			return name
+		}
+	}
+	if node.HostName != "" {
+		return node.HostName
+	}
+	if dnsName != "" {
+		return dnsName
+	}
+	if len(node.TailscaleIPs) > 0 {
+		return node.TailscaleIPs[0]
+	}
+	return ""
+}
+
+func tailscaleAddrsToStrings(addrs []netip.Addr) []string {
+	result := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		if addr.IsValid() {
+			result = append(result, addr.String())
+		}
+	}
+	return result
 }
 
 func (t *Tailscale) setBackendInitialized(err error) {
@@ -414,7 +882,8 @@ func (t *Tailscale) ResolveUDP(ctx context.Context, metadata *C.Metadata) error 
 }
 
 type tailscaleDNSTransport struct {
-	tailscale *Tailscale
+	tailscale   *Tailscale
+	allowDirect bool
 }
 
 func (t tailscaleDNSTransport) Address() string {
@@ -448,7 +917,14 @@ func (t tailscaleDNSTransport) ExchangeContext(ctx context.Context, msg *D.Msg) 
 		return nil, err
 	}
 	responseMsg.Id = msg.Id
+	t.rewriteResponse(ctx, &responseMsg)
 	return &responseMsg, nil
+}
+
+func (t tailscaleDNSTransport) rewriteResponse(ctx context.Context, response *D.Msg) {
+	if t.allowDirect && t.tailscale.magicDNSDirect != nil {
+		t.tailscale.magicDNSDirect.rewriteResponse(ctx, response)
+	}
 }
 
 func (t *Tailscale) ProxyInfo() C.ProxyInfo {
@@ -463,14 +939,25 @@ func (t *Tailscale) IsL3Protocol(metadata *C.Metadata) bool {
 
 func (t *Tailscale) Close() error {
 	t.cancel()
+	if t.option.MagicDNS {
+		tailnet.RemoveSearchDomains(t.Name())
+	}
+	for _, unregister := range t.unregisterHostForward {
+		unregister()
+	}
+	t.unregisterHostForward = nil
 	if t.unregisterDNSResolver != nil {
 		t.unregisterDNSResolver()
 	}
 	t.startOnce.Do(func() {
 		t.startErr = errors.New("tailscale outbound closed")
 	})
+	var err error
 	if t.server != nil && t.serverStarted { // tsnet.Server.Close() must not be called before or concurrently with Start.
-		return t.server.Close()
+		err = t.server.Close()
 	}
-	return nil
+	if t.kernelHostForward != nil {
+		err = errors.Join(err, t.kernelHostForward.Close())
+	}
+	return err
 }

@@ -8,15 +8,36 @@ type Tailscale struct {
 	*Base
 }
 
+type TailscaleHostForwardOption struct {
+	Enabled bool   `proxy:"enabled,omitempty"`
+	Mode    string `proxy:"mode,omitempty"`
+	Target  string `proxy:"target,omitempty"`
+	TCP     *bool  `proxy:"tcp,omitempty"`
+	UDP     *bool  `proxy:"udp,omitempty"`
+	Device  string `proxy:"device,omitempty"`
+	MTU     uint32 `proxy:"mtu,omitempty"`
+}
+
+type TailscaleMagicDNSDirectOption struct {
+	Enabled      bool     `proxy:"enabled,omitempty"`
+	Interfaces   []string `proxy:"interfaces,omitempty"`
+	ProbeTimeout int      `proxy:"probe-timeout,omitempty"`
+	CacheTTL     int      `proxy:"cache-ttl,omitempty"`
+	AnswerTTL    int      `proxy:"answer-ttl,omitempty"`
+}
+
 type TailscaleOption struct {
 	BasicOption
-	Name       string `proxy:"name"`
-	Hostname   string `proxy:"hostname,omitempty"`
-	AuthKey    string `proxy:"auth-key,omitempty"`
-	ControlURL string `proxy:"control-url,omitempty"`
-	StateDir   string `proxy:"state-dir,omitempty"`
-	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
-	UDP        bool   `proxy:"udp,omitempty"`
+	Name           string                        `proxy:"name"`
+	Hostname       string                        `proxy:"hostname,omitempty"`
+	AuthKey        string                        `proxy:"auth-key,omitempty"`
+	ControlURL     string                        `proxy:"control-url,omitempty"`
+	StateDir       string                        `proxy:"state-dir,omitempty"`
+	Ephemeral      bool                          `proxy:"ephemeral,omitempty"`
+	UDP            bool                          `proxy:"udp,omitempty"`
+	MagicDNS       bool                          `proxy:"magic-dns,omitempty"`
+	MagicDNSDirect TailscaleMagicDNSDirectOption `proxy:"magic-dns-direct,omitempty"`
+	HostForward    TailscaleHostForwardOption    `proxy:"host-forward,omitempty"`
 
 	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
 	ExitNode               string `proxy:"exit-node,omitempty"`
