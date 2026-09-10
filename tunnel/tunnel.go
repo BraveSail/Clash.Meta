@@ -231,7 +231,7 @@ func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.Prox
 	configMux.Lock()
 	proxies = newProxies
 	providers = newProviders
-	UpdateAllProxies(newProxies, newProviders)
+	invalidateAllProxies()
 	configMux.Unlock()
 }
 

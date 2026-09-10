@@ -60,7 +60,6 @@ func UpdateMMDB() (err error) {
 	}
 	if oldHash.Equal(hash) { // same hash, ignored
 		skipped = true
-		// refresh mtime so the next apply's update check won't re-trigger
 		_ = os.Chtimes(vehicle.Path(), time.Now(), time.Now())
 		return nil
 	}
@@ -98,7 +97,6 @@ func UpdateASN() (err error) {
 	}
 	if oldHash.Equal(hash) { // same hash, ignored
 		skipped = true
-		// refresh mtime so the next apply's update check won't re-trigger
 		_ = os.Chtimes(vehicle.Path(), time.Now(), time.Now())
 		return nil
 	}
@@ -138,7 +136,6 @@ func UpdateGeoIp() (err error) {
 	}
 	if oldHash.Equal(hash) { // same hash, ignored
 		skipped = true
-		// refresh mtime so the next apply's update check won't re-trigger
 		_ = os.Chtimes(vehicle.Path(), time.Now(), time.Now())
 		return nil
 	}
@@ -175,7 +172,6 @@ func UpdateGeoSite() (err error) {
 	}
 	if oldHash.Equal(hash) { // same hash, ignored
 		skipped = true
-		// refresh mtime so the next apply's update check won't re-trigger
 		_ = os.Chtimes(vehicle.Path(), time.Now(), time.Now())
 		return nil
 	}
@@ -233,7 +229,7 @@ func UpdateGeoDatabases() error {
 	log.Infoln("[GEO] Updating GEO database")
 
 	if err := updateGeoDatabases(); err != nil {
-		log.Errorln("[GEO] update GEO database error: %s", err.Error())
+		log.Infoln("[GEO] update GEO database error: %s", err.Error())
 		return err
 	}
 
@@ -260,8 +256,12 @@ func getUpdateTime() (time time.Time, err error) {
 }
 
 func RegisterGeoUpdater() {
+	registerGeoUpdater(context.Background())
+}
+
+func registerGeoUpdater(ctx context.Context) {
 	if updateInterval <= 0 {
-		log.Errorln("[GEO] Invalid update interval: %d", updateInterval)
+		log.Infoln("[GEO] Invalid update interval: %d", updateInterval)
 		return
 	}
 
@@ -271,7 +271,7 @@ func RegisterGeoUpdater() {
 
 		lastUpdate, err := getUpdateTime()
 		if err != nil {
-			log.Errorln("[GEO] Get GEO database update time error: %s", err.Error())
+			log.Infoln("[GEO] Get GEO database update time error: %s", err.Error())
 			return
 		}
 
@@ -279,15 +279,21 @@ func RegisterGeoUpdater() {
 		if lastUpdate.Add(time.Duration(updateInterval) * time.Hour).Before(time.Now()) {
 			log.Infoln("[GEO] Database has not been updated for %v, update now", time.Duration(updateInterval)*time.Hour)
 			if err := UpdateGeoDatabases(); err != nil {
-				log.Errorln("[GEO] Failed to update GEO database: %s", err.Error())
+				log.Infoln("[GEO] Failed to update GEO database: %s", err.Error())
 				return
 			}
 		}
 
-		for range ticker.C {
-			log.Infoln("[GEO] updating database every %d hours", updateInterval)
-			if err := UpdateGeoDatabases(); err != nil {
-				log.Errorln("[GEO] Failed to update GEO database: %s", err.Error())
+		for {
+			select {
+			case <-ctx.Done():
+				log.Infoln("[GEO] Geo updater stopped")
+				return
+			case <-ticker.C:
+				log.Infoln("[GEO] updating database every %d hours", updateInterval)
+				if err := UpdateGeoDatabases(); err != nil {
+					log.Infoln("[GEO] Failed to update GEO database: %s", err.Error())
+				}
 			}
 		}
 	}()
