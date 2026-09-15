@@ -505,6 +505,7 @@ func (t *Tailscale) start() error {
 			return
 		}
 		go t.watchBackendState()
+		go t.watchTailnetHealth()
 	})
 	return t.startErr
 }
@@ -577,6 +578,60 @@ func (t *Tailscale) watchBackendState() {
 				return
 			}
 			exitNodeNeedsStatus = false
+		}
+	}
+}
+
+// watchTailnetHealth is the watchdog for a platform that provides no network
+// events: Android polls the interface set every 10 minutes and only fires when
+// something actually changed, and nothing calls InjectEvent the way the
+// official app's ConnectivityManager callbacks do. A connection that dies
+// silently (phone dozed off, NAT mapping went stale, no Wi-Fi flap) therefore
+// sits offline until something forces a hard socket error — usually the user
+// toggling Wi-Fi. We poll the control plane's view of this node instead: once
+// it has shown offline for offlineGrace, inject a link change so the engine
+// rebinds as if the device had just woken up.
+func (t *Tailscale) watchTailnetHealth() {
+	lc, err := t.server.LocalClient()
+	if err != nil {
+		log.Debugln("[Tailscale](%s) watchdog: LocalClient unavailable: %v", t.Name(), err)
+		return
+	}
+	const (
+		checkInterval = 30 * time.Second
+		offlineGrace  = 90 * time.Second
+	)
+	backoff := 30 * time.Second
+	lastOnline := time.Now()
+	for {
+		select {
+		case <-t.ctx.Done():
+			return
+		case <-time.After(checkInterval):
+		}
+		ctx, cancel := context.WithTimeout(t.ctx, 10*time.Second)
+		status, err := lc.StatusWithoutPeers(ctx)
+		cancel()
+		if err != nil {
+			continue
+		}
+		if status.Self != nil && status.Self.Online {
+			lastOnline = time.Now()
+			backoff = 30 * time.Second
+			continue
+		}
+		down := time.Since(lastOnline)
+		if down < offlineGrace {
+			continue
+		}
+		log.Infoln("[Tailscale](%s) watchdog: node has been offline from the control plane for %s, injecting a link change", t.Name(), down.Truncate(time.Second))
+		t.server.InvalidateNetwork()
+		lastOnline = time.Now()
+		// Cooldown grows while the network stays down so an unauthenticated or
+		// genuinely offline node is not poked every check.
+		time.Sleep(backoff)
+		if backoff < 10*time.Minute {
+			backoff *= 2
 		}
 	}
 }
