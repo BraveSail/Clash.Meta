@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -603,11 +604,16 @@ func (t *Tailscale) watchTailnetHealth() {
 	)
 	backoff := 30 * time.Second
 	lastOnline := time.Now()
+	ticks := 0
 	for {
 		select {
 		case <-t.ctx.Done():
 			return
 		case <-time.After(checkInterval):
+		}
+		ticks++
+		if ticks%10 == 0 {
+			t.logPeerTransports()
 		}
 		ctx, cancel := context.WithTimeout(t.ctx, 10*time.Second)
 		status, err := lc.StatusWithoutPeers(ctx)
@@ -634,6 +640,52 @@ func (t *Tailscale) watchTailnetHealth() {
 			backoff *= 2
 		}
 	}
+}
+
+// logPeerTransports emits one line per tailnet peer (name plus direct path or DERP
+// relay) so the connectivity picture is visible in the core log without the UI.
+// Runs on every 10th health tick (~5 minutes at the 30s check interval).
+func (t *Tailscale) logPeerTransports() {
+	lc, err := t.server.LocalClient()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(t.ctx, 10*time.Second)
+	status, err := lc.Status(ctx)
+	cancel()
+	if err != nil {
+		return
+	}
+	peers := lo.Values(status.Peer)
+	sort.Slice(peers, func(i, j int) bool {
+		return peers[i].DNSName < peers[j].DNSName
+	})
+	parts := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		name := strings.TrimSuffix(peer.DNSName, ".")
+		if name == "" {
+			name = peer.HostName
+		}
+		if name == "" {
+			name = peer.PublicKey.ShortString()
+		}
+		transport := "offline"
+		if peer.Online {
+			switch {
+			case peer.CurAddr != "":
+				transport = "direct " + peer.CurAddr
+			case peer.Relay != "":
+				transport = "derp via " + peer.Relay
+			default:
+				transport = "online"
+			}
+			if !peer.Active {
+				transport += " (idle)"
+			}
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", name, transport))
+	}
+	log.Infoln("[Tailscale](%s) peers: %s", t.Name(), strings.Join(parts, " | "))
 }
 
 func (t *Tailscale) publishMagicDNSState(nm *netmap.NetworkMap) {
