@@ -151,4 +151,4 @@ require (
 replace google.golang.org/protobuf => github.com/metacubex/protobuf-go v0.0.0-20260306035419-7ceee0674686
 
 // BraveSail/tailscale fork: real Windows winipcfg + Android-safe link monitor wakeups
-replace github.com/metacubex/tailscale => github.com/BraveSail/tailscale v0.0.0-20260916172114-8b5fe6afd9f9
+replace github.com/metacubex/tailscale => github.com/BraveSail/tailscale v0.0.0-20260916174338-045f023e762a
