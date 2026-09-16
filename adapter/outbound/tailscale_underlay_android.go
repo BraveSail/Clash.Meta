@@ -87,22 +87,45 @@ func (t *Tailscale) probeUnderlayInterface() string {
 }
 
 // watchUnderlayInterface keeps netmon's Android default-route knowledge in
-// sync with the SIM currently carrying data. It runs until the outbound is
-// closed (t.cancel cancels t.ctx).
+// sync with the SIM currently carrying data. The protected channel and the
+// underlying interface become available asynchronously after the outbound
+// starts, so a first phase retries every few seconds until the first
+// success; the steady phase then refreshes every 30s to follow SIM switches.
+// It runs until the outbound is closed (t.cancel cancels t.ctx).
 func (t *Tailscale) watchUnderlayInterface() {
 	var last string
-	report := func(why string) {
+	apply := func(why string) bool {
 		name := t.probeUnderlayInterface()
 		if name == "" {
-			return
+			return false
 		}
 		if name != last {
 			log.Infoln("[Tailscale](%s) underlay interface: %s (%s); updating netmon default route", t.Name(), name, why)
 			last = name
 		}
 		netmon.UpdateLastKnownDefaultRouteInterface(name)
+		return true
 	}
-	report("startup")
+
+	// Phase 1: dense retries covering the VPN bring-up window. Until the
+	// VPN service installs its protect hook this probe fails immediately
+	// (errTunNotReady), so a few seconds between attempts is enough to
+	// land within one interval of the channel becoming usable.
+	for i := 0; i < 40; i++ {
+		if apply("startup") {
+			if i > 0 {
+				log.Infoln("[Tailscale](%s) underlay probe: succeeded after %d retries", t.Name(), i)
+			}
+			break
+		}
+		select {
+		case <-t.ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+
+	// Phase 2: steady cadence follows SIM switches.
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -110,7 +133,7 @@ func (t *Tailscale) watchUnderlayInterface() {
 		case <-t.ctx.Done():
 			return
 		case <-ticker.C:
-			report("periodic")
+			apply("periodic")
 		}
 	}
 }
