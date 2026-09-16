@@ -80,6 +80,13 @@ type TailscaleOption struct {
 	AcceptRoutes           *bool  `proxy:"accept-routes,omitempty"`
 	ExitNode               string `proxy:"exit-node,omitempty"`
 	ExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`
+
+	// EndpointFilter restricts which endpoint sources the embedded
+	// tsnet/magicsock collects and advertises. Empty (default) keeps
+	// upstream behavior. "nic-ipv6": advertise only the IPv6 addresses
+	// of local interfaces — STUN-mapped, portmapped, cloud-provided and
+	// static endpoints are never advertised.
+	EndpointFilter string `proxy:"endpoint-filter,omitempty"`
 }
 
 type TailscaleHostForwardOption struct {
@@ -407,11 +414,12 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		outbound.kernelHostForward = kernelHostForward
 	}
 	outbound.server = &tsnet.Server{
-		Dir:        option.StateDir,
-		Hostname:   option.Hostname,
-		AuthKey:    option.AuthKey,
-		ControlURL: option.ControlURL,
-		Ephemeral:  option.Ephemeral,
+		Dir:            option.StateDir,
+		Hostname:       option.Hostname,
+		AuthKey:        option.AuthKey,
+		ControlURL:     option.ControlURL,
+		Ephemeral:      option.Ephemeral,
+		EndpointFilter: option.EndpointFilter,
 		SystemDialer: func(ctx context.Context, network, address string) (net.Conn, error) {
 			log.Debugln("[Tailscale](%s) SystemDialer: start dial %s %s", option.Name, network, address)
 			conn, err := outbound.dialer.DialContext(ctx, network, address)
