@@ -515,6 +515,7 @@ func (t *Tailscale) start() error {
 		}
 		go t.watchBackendState()
 		go t.watchTailnetHealth()
+		go t.watchUnderlayInterface()
 	})
 	return t.startErr
 }
