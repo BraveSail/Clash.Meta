@@ -104,6 +104,13 @@ func (t *Tailscale) watchUnderlayInterface() {
 			last = name
 		}
 		netmon.UpdateLastKnownDefaultRouteInterface(name)
+		// Ask the network monitor for an immediate link-change event so
+		// magicsock recomputes endpoint candidates now instead of on its
+		// next periodic pass; without this a SIM switch could take minutes
+		// to surface in the endpoint set.
+		if t.server != nil {
+			t.server.InjectNetMonEvent()
+		}
 		return true
 	}
 
