@@ -16,7 +16,45 @@ import (
 var (
 	registryMu      sync.Mutex
 	statusProviders = map[string]StatusProvider{}
+	directories     = map[string]DirectoryProvider{}
 )
+
+// DirectoryProvider answers where a peer is right now, from a directory such as
+// the worker in BraveSail/peer-directory. Unlike a tailscale status provider it
+// owns the node's own id, so it can also answer "that peer is this node".
+type DirectoryProvider interface {
+	PeerAddress(ctx context.Context, id string) (addr string, port int, self bool, err error)
+}
+
+func RegisterDirectory(name string, provider DirectoryProvider) {
+	if name == "" || provider == nil {
+		return
+	}
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	directories[name] = provider
+}
+
+func UnregisterDirectory(name string, provider DirectoryProvider) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if current, ok := directories[name]; ok && sameIdentity(current, provider) {
+		delete(directories, name)
+	}
+}
+
+// LookupDirectoryPeer asks [directory] where the peer [id] is. The port the
+// directory reports is informational: the profile keeps owning the port it
+// dials, which is what the peer's listener is configured with.
+func LookupDirectoryPeer(ctx context.Context, directory, id string) (addr string, port int, self bool, err error) {
+	registryMu.Lock()
+	provider, ok := directories[directory]
+	registryMu.Unlock()
+	if !ok {
+		return "", 0, false, fmt.Errorf("peer directory %q is not configured", directory)
+	}
+	return provider.PeerAddress(ctx, id)
+}
 
 func RegisterStatusProvider(name string, provider StatusProvider) {
 	if name == "" || provider == nil {
@@ -41,6 +79,12 @@ func UnregisterStatusProvider(name string, provider StatusProvider) {
 // sameProvider compares identity without assuming the implementation is
 // comparable: a provider backed by a slice or map would panic on ==.
 func sameProvider(a, b StatusProvider) bool {
+	return sameIdentity(a, b)
+}
+
+// sameIdentity compares two interface values without assuming the dynamic type
+// is comparable: a provider backed by a slice or map would panic on ==.
+func sameIdentity(a, b any) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}

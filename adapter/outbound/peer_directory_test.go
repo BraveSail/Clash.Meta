@@ -1,0 +1,168 @@
+package outbound
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/metacubex/mihomo/component/tailnet"
+)
+
+type directoryStub struct {
+	reports  atomic.Int64
+	lookups  atomic.Int64
+	lastEtag atomic.Value
+	lastBody atomic.Value
+}
+
+func newDirectoryStub(t *testing.T, addr string) (*directoryStub, *httptest.Server) {
+	t.Helper()
+	stub := &directoryStub{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("authorization") != "Bearer secret" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch request.URL.Path {
+		case "/report":
+			stub.reports.Add(1)
+			stub.lastEtag.Store(request.Header.Get("if-none-match"))
+			body := map[string]any{}
+			_ = json.NewDecoder(request.Body).Decode(&body)
+			stub.lastBody.Store(body)
+			if request.Header.Get("if-none-match") == `"`+addr+`:8443"` {
+				writer.Header().Set("etag", `"`+addr+`:8443"`)
+				writer.WriteHeader(http.StatusNotModified)
+				return
+			}
+			writer.Header().Set("etag", `"`+addr+`:8443"`)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"id":      body["id"],
+				"addr":    addr,
+				"port":    body["port"],
+				"changed": true,
+			})
+		case "/lookup":
+			stub.lookups.Add(1)
+			id := request.URL.Query().Get("id")
+			if id != "gt7" {
+				writer.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"nodes": map[string]any{"gt7": map[string]any{"addr": "2409:895a::1", "port": 8443}},
+			})
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return stub, server
+}
+
+func newTestDirectory(t *testing.T, url string) *PeerDirectory {
+	t.Helper()
+	directory, err := NewPeerDirectory(PeerDirectoryOption{
+		Name:    "dir",
+		URL:     url,
+		Token:   "secret",
+		ID:      "pc",
+		Port:    8443,
+		Refresh: 3600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = directory.Close() })
+	return directory
+}
+
+func TestPeerDirectoryReportsAndFollowsTheObservedAddress(t *testing.T) {
+	stub, server := newDirectoryStub(t, "2409:8a55::1")
+	directory := newTestDirectory(t, server.URL)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for stub.reports.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if stub.reports.Load() == 0 {
+		t.Fatal("the directory never received a report")
+	}
+	body, _ := stub.lastBody.Load().(map[string]any)
+	if body["id"] != "pc" || body["port"] != float64(8443) {
+		t.Fatalf("report body = %v", body)
+	}
+	if got := directory.Addr(); got != "2409:8a55::1:8443" {
+		t.Fatalf("Addr() = %q, want the address the directory observed", got)
+	}
+
+	// A second report carries the etag, so an unchanged address answers 304.
+	directory.report(context.Background())
+	if etag, _ := stub.lastEtag.Load().(string); etag != `"2409:8a55::1:8443"` {
+		t.Fatalf("second report sent etag %q", etag)
+	}
+}
+
+func TestPeerDirectoryLooksUpPeersAndAnswersForItself(t *testing.T) {
+	stub, server := newDirectoryStub(t, "2409:8a55::1")
+	directory := newTestDirectory(t, server.URL)
+	ctx := context.Background()
+
+	addr, port, self, err := directory.PeerAddress(ctx, "pc")
+	if err != nil || !self || addr != "" || port != 8443 {
+		t.Fatalf("PeerAddress(self) = %q %d self=%v err=%v", addr, port, self, err)
+	}
+	if stub.lookups.Load() != 0 {
+		t.Fatal("a self lookup reached the network")
+	}
+
+	addr, port, self, err = directory.PeerAddress(ctx, "gt7")
+	if err != nil || self || addr != "2409:895a::1" || port != 8443 {
+		t.Fatalf("PeerAddress(gt7) = %q %d self=%v err=%v", addr, port, self, err)
+	}
+	if _, _, _, err := directory.PeerAddress(ctx, "gt7"); err != nil {
+		t.Fatal(err)
+	}
+	if lookups := stub.lookups.Load(); lookups != 1 {
+		t.Fatalf("lookups = %d, want the second one to come from the cache", lookups)
+	}
+	if _, _, _, err := directory.PeerAddress(ctx, "missing"); err == nil {
+		t.Fatal("an unknown peer resolved")
+	}
+}
+
+func TestPeerDirectoryRegistersItselfForPeersOutbounds(t *testing.T) {
+	_, server := newDirectoryStub(t, "2409:8a55::1")
+	directory := newTestDirectory(t, server.URL)
+
+	_, _, self, err := tailnet.LookupDirectoryPeer(context.Background(), "dir", "pc")
+	if err != nil {
+		t.Fatalf("registered directory is not reachable: %v", err)
+	}
+	if !self {
+		t.Fatal("the directory did not report this node as itself")
+	}
+
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := tailnet.LookupDirectoryPeer(context.Background(), "dir", "pc"); err == nil {
+		t.Fatal("a closed directory is still registered")
+	}
+}
+
+func TestPeerDirectoryRejectsIncompleteOptions(t *testing.T) {
+	if _, err := NewPeerDirectory(PeerDirectoryOption{Name: "x", URL: "not-a-url", ID: "pc"}); err == nil {
+		t.Fatal("an invalid url was accepted")
+	}
+	if _, err := NewPeerDirectory(PeerDirectoryOption{Name: "x", URL: "https://example.com", ID: "bad id"}); err == nil {
+		t.Fatal("an invalid id was accepted")
+	}
+	if _, err := NewPeerDirectory(PeerDirectoryOption{Name: "x", URL: "https://example.com", ID: "pc", Port: 70000}); err == nil {
+		t.Fatal("an invalid port was accepted")
+	}
+}

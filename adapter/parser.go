@@ -216,6 +216,13 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		proxy, err = NewTailnetPeer(*tailnetPeerOption)
+	case "peer-directory":
+		peerDirectoryOption := &outbound.PeerDirectoryOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, peerDirectoryOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewPeerDirectory(*peerDirectoryOption)
 	case "zerotier":
 		zeroTierOption := &outbound.ZeroTierOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, zeroTierOption)

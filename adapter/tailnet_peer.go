@@ -25,10 +25,11 @@ const tailnetPeerResolveTTL = 2 * time.Second
 // are replaced with the peer's current address.
 type TailnetPeerOption struct {
 	outbound.BasicOption
-	Name  string         `proxy:"name"`
-	Peer  string         `proxy:"peer"`
-	Port  int            `proxy:"port"`
-	Proxy map[string]any `proxy:"proxy"`
+	Name      string         `proxy:"name"`
+	Peer      string         `proxy:"peer"`
+	Port      int            `proxy:"port"`
+	Proxy     map[string]any `proxy:"proxy"`
+	Directory string         `proxy:"directory,omitempty"`
 }
 
 type TailnetPeer struct {
@@ -184,6 +185,19 @@ func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err 
 		return host, self, nil
 	}
 	t.mu.Unlock()
+
+	if t.option.Directory != "" {
+		addr, _, self, err := tailnet.LookupDirectoryPeer(ctx, t.option.Directory, t.option.Peer)
+		if err != nil {
+			return "", false, fmt.Errorf("tailnet-peer: %w", err)
+		}
+		if self {
+			t.storeResolved("", true)
+			return "", true, nil
+		}
+		t.storeResolved(addr, false)
+		return addr, false, nil
+	}
 
 	peer, isSelf, found := tailnet.ResolvePeer(ctx, t.option.Peer)
 	if !found {

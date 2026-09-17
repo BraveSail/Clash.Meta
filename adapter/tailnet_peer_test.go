@@ -118,6 +118,60 @@ func TestTailnetPeerMissingPeerFails(t *testing.T) {
 	}
 }
 
+type stubDirectory struct {
+	addr string
+	port int
+	self bool
+}
+
+func (s stubDirectory) PeerAddress(context.Context, string) (string, int, bool, error) {
+	return s.addr, s.port, s.self, nil
+}
+
+// With a directory outbound the address comes from the Cloudflare directory
+// instead of a tailscale status, and the same self shortcut applies.
+func TestTailnetPeerResolvesThroughDirectory(t *testing.T) {
+	directory := stubDirectory{addr: "2409:8a55:d0a4:5500::9", port: 8443}
+	tailnet.RegisterDirectory("dir", directory)
+	t.Cleanup(func() { tailnet.UnregisterDirectory("dir", directory) })
+
+	created, err := NewTailnetPeer(TailnetPeerOption{
+		Name:      "pc",
+		Peer:      "pc",
+		Port:      23333,
+		Proxy:     map[string]any{"type": "direct", "name": "inner"},
+		Directory: "dir",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = created.Close() })
+
+	host, self, err := created.resolve(context.Background())
+	if err != nil || self || host != "2409:8a55:d0a4:5500::9" {
+		t.Fatalf("resolve = %q self=%v err=%v", host, self, err)
+	}
+
+	selfDirectory := stubDirectory{self: true}
+	tailnet.RegisterDirectory("self", selfDirectory)
+	t.Cleanup(func() { tailnet.UnregisterDirectory("self", selfDirectory) })
+	created, err = NewTailnetPeer(TailnetPeerOption{
+		Name:      "gt7",
+		Peer:      "gt7",
+		Port:      23333,
+		Proxy:     map[string]any{"type": "direct", "name": "inner"},
+		Directory: "self",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = created.Close() })
+	host, self, err = created.resolve(context.Background())
+	if err != nil || !self || host != "" {
+		t.Fatalf("resolve(self) = %q self=%v err=%v", host, self, err)
+	}
+}
+
 // A service that this node runs is reachable on the loopback address: dialing
 // the destination as it stands would come back through the rule that selected
 // this outbound.
