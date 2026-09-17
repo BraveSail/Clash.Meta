@@ -93,6 +93,15 @@ func (t *TailnetPeer) buildInner(host string) (C.Proxy, error) {
 }
 
 func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	if _, self, err := t.resolve(ctx); err != nil {
+		return nil, err
+	} else if self {
+		if conn, err := t.dialLocalService(ctx, metadata); err == nil {
+			return conn, nil
+		}
+		return t.direct.DialContext(ctx, metadata)
+	}
+
 	proxy, err := t.proxyForDial(ctx)
 	if err != nil {
 		return nil, err
@@ -102,6 +111,28 @@ func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.
 		t.invalidate()
 	}
 	return conn, err
+}
+
+// dialLocalService reaches a service that runs on this node. The destination of
+// such a connection is this node's own tailnet address, and dialing it as it
+// stands would route the connection back into the rule that chose this
+// outbound; the service is listening on the loopback address with the same port.
+func (t *TailnetPeer) dialLocalService(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	if metadata == nil || metadata.DstPort == 0 {
+		return nil, errors.New("tailnet-peer: no port to dial on this node")
+	}
+	var lastErr error
+	for _, loopback := range []netip.Addr{netip.MustParseAddr("::1"), netip.MustParseAddr("127.0.0.1")} {
+		local := *metadata
+		local.Host = ""
+		local.DstIP = loopback
+		conn, err := t.direct.DialContext(ctx, &local)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func (t *TailnetPeer) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
