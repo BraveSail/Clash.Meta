@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -26,10 +27,34 @@ func RegisterStatusProvider(name string, provider StatusProvider) {
 	statusProviders[name] = provider
 }
 
-func UnregisterStatusProvider(name string) {
+// UnregisterStatusProvider removes [provider] only if it is still the one
+// registered under [name]: a config reload builds the replacement before the
+// previous outbound stops, and removing by name alone would drop the new one.
+func UnregisterStatusProvider(name string, provider StatusProvider) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	delete(statusProviders, name)
+	if current, ok := statusProviders[name]; ok && sameProvider(current, provider) {
+		delete(statusProviders, name)
+	}
+}
+
+// sameProvider compares identity without assuming the implementation is
+// comparable: a provider backed by a slice or map would panic on ==.
+func sameProvider(a, b StatusProvider) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	kind := reflect.TypeOf(a)
+	if kind != reflect.TypeOf(b) || !kind.Comparable() {
+		return false
+	}
+	return a == b
+}
+
+func RegisteredProviderCount() int {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	return len(statusProviders)
 }
 
 func statusProviderSnapshot() []StatusProvider {

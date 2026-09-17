@@ -15,13 +15,14 @@ func (s stubProvider) TailnetStatus(context.Context) (Status, error) {
 }
 
 func TestResolvePeerFindsSelfAndPeers(t *testing.T) {
-	RegisterStatusProvider("ts", stubProvider{status: Status{
+	provider := &stubProvider{status: Status{
 		Self: &NodeStatus{Name: "me.tailnet.ts.net.", HostName: "me"},
 		Peers: []NodeStatus{
 			{Name: "pc.tailnet.ts.net.", HostName: "pc", TailscaleIPs: []string{"100.64.0.5"}},
 		},
-	}})
-	t.Cleanup(func() { UnregisterStatusProvider("ts") })
+	}}
+	RegisterStatusProvider("ts", provider)
+	t.Cleanup(func() { UnregisterStatusProvider("ts", provider) })
 
 	if peer, self, found := ResolvePeer(context.Background(), "pc"); !found || self || peer.HostName != "pc" {
 		t.Fatalf("ResolvePeer(pc) = %+v self=%v found=%v", peer, self, found)
@@ -34,6 +35,23 @@ func TestResolvePeerFindsSelfAndPeers(t *testing.T) {
 	}
 	if _, _, found := ResolvePeer(context.Background(), "missing"); found {
 		t.Fatal("ResolvePeer(missing) found an unknown peer")
+	}
+}
+
+func TestUnregisterKeepsTheReplacement(t *testing.T) {
+	previous := &stubProvider{status: Status{Peers: []NodeStatus{{Name: "old"}}}}
+	replacement := &stubProvider{status: Status{Peers: []NodeStatus{{Name: "new"}}}}
+	RegisterStatusProvider("ts", previous)
+	RegisterStatusProvider("ts", replacement)
+	t.Cleanup(func() { UnregisterStatusProvider("ts", replacement) })
+
+	UnregisterStatusProvider("ts", previous)
+
+	if count := RegisteredProviderCount(); count != 1 {
+		t.Fatalf("providers after the old outbound stopped = %d, want the replacement", count)
+	}
+	if _, _, found := ResolvePeer(context.Background(), "new"); !found {
+		t.Fatal("the replacement provider is gone")
 	}
 }
 

@@ -54,7 +54,7 @@ func TestTailnetPeerResolvesAddressAndFollowsChanges(t *testing.T) {
 		}},
 	}}
 	tailnet.RegisterStatusProvider("ts", provider)
-	t.Cleanup(func() { tailnet.UnregisterStatusProvider("ts") })
+	t.Cleanup(func() { tailnet.UnregisterStatusProvider("ts", provider) })
 
 	peer := testTailnetPeer(t, "pc", 23333)
 
@@ -91,10 +91,11 @@ func TestTailnetPeerResolvesAddressAndFollowsChanges(t *testing.T) {
 }
 
 func TestTailnetPeerDegradesToDirectForItself(t *testing.T) {
-	tailnet.RegisterStatusProvider("ts", &stubTailnetProvider{status: tailnet.Status{
+	provider := &stubTailnetProvider{status: tailnet.Status{
 		Self: &tailnet.NodeStatus{Name: "pc", HostName: "pc"},
-	}})
-	t.Cleanup(func() { tailnet.UnregisterStatusProvider("ts") })
+	}}
+	tailnet.RegisterStatusProvider("ts", provider)
+	t.Cleanup(func() { tailnet.UnregisterStatusProvider("ts", provider) })
 
 	peer := testTailnetPeer(t, "pc", 23333)
 	proxy, err := peer.proxyForDial(context.Background())

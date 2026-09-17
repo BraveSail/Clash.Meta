@@ -1095,7 +1095,7 @@ func (t *Tailscale) IsL3Protocol(metadata *C.Metadata) bool {
 
 func (t *Tailscale) Close() error {
 	t.cancel()
-	tailnet.UnregisterStatusProvider(t.Name())
+	tailnet.UnregisterStatusProvider(t.Name(), t)
 	if t.option.MagicDNS {
 		tailnet.RemoveSearchDomains(t.Name())
 	}
