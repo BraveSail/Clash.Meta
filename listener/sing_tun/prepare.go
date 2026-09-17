@@ -30,7 +30,7 @@ func (h *ListenerHandler) PrepareConnection(network string, source M.Socksaddr, 
 			return nil, nil
 		}
 		log.Infoln("[ICMP] %s %s --> %s using DIRECT", network, source, destination)
-		directRouteDestination, err := ping.ConnectDestination(context.TODO(), log.SingLogger, dialer.ICMPControl(destination.Addr), destination.Addr, routeContext, timeout)
+		directRouteDestination, err := directICMPDestination(destination, routeContext, timeout)
 		if err != nil {
 			log.Warnln("[ICMP] failed to connect to %s", destination)
 			return nil, err
@@ -39,6 +39,13 @@ func (h *ListenerHandler) PrepareConnection(network string, source M.Socksaddr, 
 		return directRouteDestination, nil
 	}
 	return nil, nil
+}
+
+// directICMPDestination is the path an echo keeps when no outbound carries it:
+// sing-tun's own socket, which the dialer binds to the interface the machine
+// would use, so the echo leaves without entering these rules a second time.
+func directICMPDestination(destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+	return ping.ConnectDestination(context.TODO(), log.SingLogger, dialer.ICMPControl(destination.Addr), destination.Addr, routeContext, timeout)
 }
 
 func (h *ListenerHandler) skipPingForwardingByAddr(addr netip.Addr) bool {
