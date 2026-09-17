@@ -390,6 +390,12 @@ func (p *autoCloseProxyAdapter) Close() error {
 	return p.closeErr
 }
 
+// WrappedProxyAdapter implements constant.ProxyAdapterWrapper: the adapter this
+// one closes is also the one that answers what a type assertion cannot see.
+func (p *autoCloseProxyAdapter) WrappedProxyAdapter() C.ProxyAdapter {
+	return p.ProxyAdapter
+}
+
 func NewAutoCloseProxyAdapter(adapter ProxyAdapter) ProxyAdapter {
 	proxy := &autoCloseProxyAdapter{
 		ProxyAdapter: adapter,

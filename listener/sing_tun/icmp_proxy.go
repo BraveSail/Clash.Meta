@@ -89,13 +89,20 @@ func (h *ListenerHandler) prepareICMPProxy(
 		metadata.Host = host
 	}
 	proxy, err := tunnel.MatchProxy(metadata)
-	if err != nil || proxy == nil {
+	if err != nil {
+		log.Debugln("[ICMP] %s: %s", destination.Addr, err)
+		return nil
+	}
+	if proxy == nil {
+		log.Debugln("[ICMP] %s matched no outbound", destination.Addr)
 		return nil
 	}
 	carrier, carrierName := icmpCarrier(proxy, metadata)
 	if carrier == nil {
+		log.Debugln("[ICMP] %s matches %s, which cannot carry an echo", destination.Addr, proxy.Name())
 		return nil
 	}
+	log.Debugln("[ICMP] %s host=%q matches %s", destination.Addr, metadata.Host, carrierName)
 	log.Infoln("[ICMP] %s %s --> %s using %s", metadata.NetWork.String(), source, destination, carrierName)
 	return newICMPProxyDestination(parent, routeContext, carrier, metadata, source, destination, timeout)
 }
@@ -103,10 +110,13 @@ func (h *ListenerHandler) prepareICMPProxy(
 // icmpCarrier finds the outbound that would carry the echo. A rule may name a
 // group, and what a group dials is what it would have carried this echo with:
 // the selection is read without touching it, the same way TCP and UDP follow
-// it, so a peer that is currently selected can answer a ping.
+// it, so a peer that is currently selected can answer a ping. A decorator
+// around the outbound - the one that closes it when the config is replaced -
+// embeds the adapter interface and hides everything else, so the adapter
+// underneath is asked too.
 func icmpCarrier(proxy C.Proxy, metadata *C.Metadata) (C.ICMPProxy, string) {
 	for depth := 0; proxy != nil && depth < 8; depth++ {
-		if carrier, ok := proxy.Adapter().(C.ICMPProxy); ok {
+		if carrier, ok := C.ICMPCarrierOf(proxy.Adapter()); ok {
 			return carrier, proxy.Name()
 		}
 		proxy = proxy.Unwrap(metadata, false)

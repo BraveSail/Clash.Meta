@@ -170,6 +170,30 @@ type ICMPProxy interface {
 	ExchangeICMP(ctx context.Context, metadata *Metadata, request []byte) ([]byte, error)
 }
 
+// ProxyAdapterWrapper is implemented by an adapter that decorates another one.
+// The decorator embeds the ProxyAdapter interface, so an optional interface the
+// adapter underneath implements - ICMPProxy, for one - cannot be reached by a
+// type assertion on the decorator; it is reached from here instead.
+type ProxyAdapterWrapper interface {
+	WrappedProxyAdapter() ProxyAdapter
+}
+
+// ICMPCarrierOf answers whether an adapter can carry an echo, looking through
+// the decorators that hide it.
+func ICMPCarrierOf(adapter ProxyAdapter) (ICMPProxy, bool) {
+	for depth := 0; adapter != nil && depth < 8; depth++ {
+		if carrier, ok := adapter.(ICMPProxy); ok {
+			return carrier, true
+		}
+		wrapper, ok := adapter.(ProxyAdapterWrapper)
+		if !ok {
+			break
+		}
+		adapter = wrapper.WrappedProxyAdapter()
+	}
+	return nil, false
+}
+
 type ProxyState struct {
 	Alive   bool           `json:"alive"`
 	History []DelayHistory `json:"history"`

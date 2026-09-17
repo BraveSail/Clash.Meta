@@ -9,6 +9,37 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 )
 
+var _ C.ICMPProxy = (*TailnetPeer)(nil)
+
+// The outbound the rules pick has to be the one the handler can ask: the
+// wrapper the config produces is what the TUN sees, so it is the wrapper the
+// test asks.
+func TestTailnetPeerOutboundCarriesAnEcho(t *testing.T) {
+	proxy, err := ParseProxy(map[string]any{
+		"name":            "pc",
+		"type":            "tailnet-peer",
+		"peer":            "pc",
+		"port":            8443,
+		"directory-id":    "pc",
+		"directory-url":   "https://directory.invalid",
+		"directory-token": "token",
+		"proxy": map[string]any{
+			"type":   "vless",
+			"server": "127.0.0.1",
+			"port":   8443,
+			"uuid":   "9351949c-4db4-4392-a8ab-3d06f75e74d5",
+			"udp":    true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ParseProxy: %v", err)
+	}
+	t.Cleanup(func() { _ = proxy.Close() })
+	if _, ok := C.ICMPCarrierOf(proxy.Adapter()); !ok {
+		t.Fatalf("%s (%T) does not carry ICMP", proxy.Name(), proxy.Adapter())
+	}
+}
+
 // A ping aimed at the peer's name is answered where the peer is: the echo goes
 // to the peer's own loopback, which every stack answers without a network, and
 // the round trip the caller measures is the tunnel.
