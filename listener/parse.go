@@ -55,6 +55,15 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 			return nil, err
 		}
 		listener, err = IN.NewMixed(mixedOption)
+	case "icmp-responder":
+		// The far end of the tunnel's echo support: it puts a real echo on the
+		// wire for a peer that asked through the tunnel.
+		icmpOption := &IN.ICMPResponderOption{}
+		err = decoder.Decode(mapping, icmpOption)
+		if err != nil {
+			return nil, err
+		}
+		listener, err = IN.NewICMPResponder(icmpOption)
 	case "tunnel":
 		tunnelOption := &IN.TunnelOption{}
 		err = decoder.Decode(mapping, tunnelOption)

@@ -46,8 +46,12 @@ type TailnetPeerOption struct {
 	// Heartbeat is how often the directory client this outbound shares reports
 	// even when nothing changed, in seconds; the inline form of the directory
 	// takes the same option as a `peer-directory` outbound would.
-	Heartbeat int            `proxy:"heartbeat,omitempty"`
-	Proxy     map[string]any `proxy:"proxy"`
+	Heartbeat int `proxy:"heartbeat,omitempty"`
+	// ICMPPort is where the peer's responder listens for a carried echo. It
+	// defaults to one above the tunnel's own port, so a shared profile needs no
+	// extra setting.
+	ICMPPort int            `proxy:"icmp-port,omitempty"`
+	Proxy    map[string]any `proxy:"proxy"`
 }
 
 // directoryID is the name this node reports under: the app's own setting when it
