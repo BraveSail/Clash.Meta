@@ -186,6 +186,29 @@ func TestPeerDirectoryLooksUpPeersAndAnswersForItself(t *testing.T) {
 	}
 }
 
+// A directory that reports which nodes are up needs a heartbeat: the address
+// did not move, but the node is still there.
+func TestPeerDirectoryHeartbeatsWhenTheAddressIsUnchanged(t *testing.T) {
+	stub, server := newDirectoryStub(t, "2409:8a55::1")
+	directory := newTestDirectory(t, server.URL)
+	directory.heartbeat = 60 * time.Millisecond
+
+	directory.maybeReport(true)
+	first := stub.reports.Load()
+	if first == 0 {
+		t.Fatal("the first report did not leave the machine")
+	}
+	directory.maybeReport(false)
+	if reported := stub.reports.Load(); reported != first {
+		t.Fatalf("reports = %d, want no report inside the heartbeat", reported)
+	}
+	time.Sleep(80 * time.Millisecond)
+	directory.maybeReport(false)
+	if reported := stub.reports.Load(); reported != first+1 {
+		t.Fatalf("reports = %d, want one heartbeat after the interval", reported)
+	}
+}
+
 func TestPeerDirectoryRegistersItselfForPeersOutbounds(t *testing.T) {
 	_, server := newDirectoryStub(t, "2409:8a55::1")
 	directory := newTestDirectory(t, server.URL)

@@ -29,6 +29,10 @@ const (
 	peerDirectoryDefaultRefresh = 30 * time.Second
 	peerDirectoryDefaultTimeout = 10 * time.Second
 	peerDirectoryLookupTTL      = 2 * time.Second
+	// A directory that shows which nodes are up needs to hear from a node even
+	// when its address did not move, so a report goes out at least this often.
+	peerDirectoryDefaultHeartbeat = 2 * time.Minute
+	peerDirectoryMinimumHeartbeat = 30 * time.Second
 )
 
 var peerDirectoryIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,63}$`)
@@ -44,6 +48,9 @@ type PeerDirectoryOption struct {
 	Port    int    `proxy:"port,omitempty"`
 	Refresh int    `proxy:"refresh,omitempty"`
 	Timeout int    `proxy:"timeout,omitempty"`
+	// Heartbeat is how often this node reports even when nothing changed, in
+	// seconds. Keep it well inside the directory's online window.
+	Heartbeat int `proxy:"heartbeat,omitempty"`
 }
 
 // PeerDirectory keeps one node's address current in a directory service and
@@ -62,6 +69,8 @@ type PeerDirectory struct {
 	addr       string
 	sentAddr   string
 	sentPort   int
+	sentAt     time.Time
+	heartbeat  time.Duration
 	peers      map[string]cachedPeer
 	warnedOnce bool
 }
@@ -92,6 +101,13 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 		timeout = time.Duration(option.Timeout) * time.Second
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	heartbeat := peerDirectoryDefaultHeartbeat
+	if option.Heartbeat > 0 {
+		heartbeat = time.Duration(option.Heartbeat) * time.Second
+	}
+	if heartbeat < peerDirectoryMinimumHeartbeat {
+		heartbeat = peerDirectoryMinimumHeartbeat
+	}
 	directory := &PeerDirectory{
 		Base: NewBase(BaseOption{
 			Name:         option.Name,
@@ -99,11 +115,12 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 			Type:         C.PeerDirectory,
 			ProviderName: option.ProviderName,
 		}),
-		option: option,
-		client: &http.Client{Timeout: timeout},
-		ctx:    ctx,
-		cancel: cancel,
-		peers:  map[string]cachedPeer{},
+		option:    option,
+		client:    &http.Client{Timeout: timeout},
+		ctx:       ctx,
+		cancel:    cancel,
+		heartbeat: heartbeat,
+		peers:     map[string]cachedPeer{},
 	}
 	peerdirectory.Register(option.Name, directory)
 	go directory.run()
@@ -217,12 +234,17 @@ func (d *PeerDirectory) run() {
 	}
 }
 
-// maybeReport sends the node's address only when it is worth sending: the first
-// time, and after the address this node would publish changes.
+// maybeReport sends the node's address when it is worth sending: the first
+// time, after the address this node would publish changes, and once every
+// heartbeat so the directory can tell a quiet node from an absent one.
 func (d *PeerDirectory) maybeReport(force bool) {
 	addr := pickReportAddress(localAddressesByInterface())
 	d.mu.Lock()
-	unchanged := !force && addr == d.sentAddr && d.option.Port == d.sentPort
+	unchanged := !force &&
+		addr == d.sentAddr &&
+		d.option.Port == d.sentPort &&
+		!d.sentAt.IsZero() &&
+		time.Since(d.sentAt) < d.heartbeat
 	d.mu.Unlock()
 	if unchanged {
 		return
@@ -292,6 +314,7 @@ func (d *PeerDirectory) markSent(addr string) {
 	d.mu.Lock()
 	d.sentAddr = addr
 	d.sentPort = d.option.Port
+	d.sentAt = time.Now()
 	d.mu.Unlock()
 }
 
