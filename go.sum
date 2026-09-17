@@ -18,6 +18,8 @@ github.com/BraveSail/tailscale v0.0.0-20260916194355-a7a87e04291b h1:BXO4EDthy07
 github.com/BraveSail/tailscale v0.0.0-20260916194355-a7a87e04291b/go.mod h1:8LYnOyQGmeGA43tbkKcq4VfP9Y+zVk/c6p/1F05Rvxs=
 github.com/BraveSail/tailscale v0.0.0-20260916211413-07ede9388edd h1:5EZm/act9GAVR7u8xOtmAHw3pO6qLrLlbYXL6bQEnSM=
 github.com/BraveSail/tailscale v0.0.0-20260916211413-07ede9388edd/go.mod h1:8LYnOyQGmeGA43tbkKcq4VfP9Y+zVk/c6p/1F05Rvxs=
+github.com/BraveSail/tailscale v0.0.0-20260917003548-1df2c2a05305 h1:YSNxlICYZLB1qsAk05HlL/u4mPM3t8Jp73wbE4iotjA=
+github.com/BraveSail/tailscale v0.0.0-20260917003548-1df2c2a05305/go.mod h1:8LYnOyQGmeGA43tbkKcq4VfP9Y+zVk/c6p/1F05Rvxs=
 github.com/RyuaNerin/go-krypto v1.3.0 h1:smavTzSMAx8iuVlGb4pEwl9MD2qicqMzuXR2QWp2/Pg=
 github.com/RyuaNerin/go-krypto v1.3.0/go.mod h1:9R9TU936laAIqAmjcHo/LsaXYOZlymudOAxjaBf62UM=
 github.com/RyuaNerin/testingutil v0.1.0 h1:IYT6JL57RV3U2ml3dLHZsVtPOP6yNK7WUVdzzlpNrss=
