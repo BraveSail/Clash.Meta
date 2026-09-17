@@ -400,6 +400,7 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		backendInitCh: make(chan struct{}),
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
+	tailnet.RegisterStatusProvider(option.Name, outbound)
 	if option.MagicDNSDirect.Enabled {
 		magicDNSDirect, err := newTailscaleMagicDNSDirectResolver(outbound, option.MagicDNSDirect)
 		if err != nil {
@@ -1065,6 +1066,7 @@ func (t *Tailscale) IsL3Protocol(metadata *C.Metadata) bool {
 
 func (t *Tailscale) Close() error {
 	t.cancel()
+	tailnet.UnregisterStatusProvider(t.Name())
 	if t.option.MagicDNS {
 		tailnet.RemoveSearchDomains(t.Name())
 	}
