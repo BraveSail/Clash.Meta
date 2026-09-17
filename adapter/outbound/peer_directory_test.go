@@ -107,9 +107,46 @@ func TestPeerDirectoryReportsAndFollowsTheObservedAddress(t *testing.T) {
 	}
 
 	// A second report carries the etag, so an unchanged address answers 304.
-	directory.report(context.Background())
+	sent := ""
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		directory.mu.Lock()
+		sent = directory.sentAddr
+		directory.mu.Unlock()
+		if sent != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sent == "" {
+		t.Fatal("the first report never completed")
+	}
+	directory.report(context.Background(), sent)
 	if etag, _ := stub.lastEtag.Load().(string); etag != `"2409:8a55::1:8443"` {
 		t.Fatalf("second report sent etag %q", etag)
+	}
+}
+
+func TestPeerDirectorySkipsAnUnchangedReport(t *testing.T) {
+	stub, server := newDirectoryStub(t, "2409:8a55::1")
+	directory := newTestDirectory(t, server.URL)
+	deadline := time.Now().Add(2 * time.Second)
+	for stub.reports.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	reports := stub.reports.Load()
+	if reports == 0 {
+		t.Fatal("the first report never left the machine")
+	}
+
+	// The machine's address did not change, so the periodic check is local only.
+	directory.maybeReport(false)
+	if got := stub.reports.Load(); got != reports {
+		t.Fatalf("reports = %d, want the unchanged address to stay off the wire", got)
+	}
+	// A node that moved reports again even though the cadence has not passed.
+	directory.maybeReport(true)
+	if got := stub.reports.Load(); got != reports+1 {
+		t.Fatalf("reports = %d, want a forced report after a change", got)
 	}
 }
 

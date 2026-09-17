@@ -60,6 +60,8 @@ type PeerDirectory struct {
 	mu         sync.Mutex
 	etag       string
 	addr       string
+	sentAddr   string
+	sentPort   int
 	peers      map[string]cachedPeer
 	warnedOnce bool
 }
@@ -193,15 +195,16 @@ func (d *PeerDirectory) lookup(ctx context.Context, id string) (string, int, err
 }
 
 // run reports this node now and then on a jittered cadence: the directory
-// answers 304 while the observed address is unchanged, so the heartbeat stays
-// cheap, and a changed address is picked up within one interval.
+// keeps the record until the node changes it, so the cadence only re-reads the
+// local interfaces - a report leaves the machine only when the address it would
+// publish is different from the one it last published.
 func (d *PeerDirectory) run() {
-	d.report(d.ctx)
+	d.maybeReport(true)
+	interval := peerDirectoryDefaultRefresh
+	if d.option.Refresh > 0 {
+		interval = time.Duration(d.option.Refresh) * time.Second
+	}
 	for {
-		interval := peerDirectoryDefaultRefresh
-		if d.option.Refresh > 0 {
-			interval = time.Duration(d.option.Refresh) * time.Second
-		}
 		jitter := time.Duration(rand.Int63n(int64(interval / 2)))
 		timer := time.NewTimer(interval - interval/4 + jitter)
 		select {
@@ -209,20 +212,30 @@ func (d *PeerDirectory) run() {
 			timer.Stop()
 			return
 		case <-timer.C:
-			d.report(d.ctx)
+			d.maybeReport(false)
 		}
 	}
 }
 
-func (d *PeerDirectory) report(ctx context.Context) {
+// maybeReport sends the node's address only when it is worth sending: the first
+// time, and after the address this node would publish changes.
+func (d *PeerDirectory) maybeReport(force bool) {
+	addr := pickReportAddress(localAddressesByInterface())
+	d.mu.Lock()
+	unchanged := !force && addr == d.sentAddr && d.option.Port == d.sentPort
+	d.mu.Unlock()
+	if unchanged {
+		return
+	}
+	d.report(d.ctx, addr)
+}
+
+func (d *PeerDirectory) report(ctx context.Context, addr string) {
 	payload := map[string]any{
 		"id":   d.option.ID,
 		"port": d.option.Port,
 	}
-	// The address this node knows about itself beats the one the directory
-	// observed: the report may travel through a proxy, and a peer has to dial
-	// the address the node actually holds.
-	if addr := pickReportAddress(localAddressesByInterface()); addr != "" {
+	if addr != "" {
 		payload["addr"] = addr
 	}
 	body, err := json.Marshal(payload)
@@ -249,6 +262,7 @@ func (d *PeerDirectory) report(ctx context.Context) {
 	defer func() { _ = response.Body.Close() }()
 	switch response.StatusCode {
 	case http.StatusNotModified:
+		d.markSent(addr)
 		d.resetWarning()
 	case http.StatusOK:
 		var payload struct {
@@ -264,6 +278,7 @@ func (d *PeerDirectory) report(ctx context.Context) {
 		d.addr = payload.Addr
 		d.etag = response.Header.Get("etag")
 		d.mu.Unlock()
+		d.markSent(addr)
 		if previous != payload.Addr {
 			log.Infoln("[PeerDirectory](%s) %s is at %s:%d", d.Name(), d.option.ID, payload.Addr, d.option.Port)
 		}
@@ -271,6 +286,13 @@ func (d *PeerDirectory) report(ctx context.Context) {
 	default:
 		d.logFailure("report rejected with %d", response.StatusCode)
 	}
+}
+
+func (d *PeerDirectory) markSent(addr string) {
+	d.mu.Lock()
+	d.sentAddr = addr
+	d.sentPort = d.option.Port
+	d.mu.Unlock()
 }
 
 // pickReportAddress chooses the address this node publishes: a peer has to dial
