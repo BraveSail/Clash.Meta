@@ -298,6 +298,12 @@ func (v *Vless) streamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 	}
 	if err != nil {
 		conn = nil
+	} else if v.encryption != nil {
+		// The request travels with the first write, which never comes when the
+		// peer speaks first (SSH): send it as soon as the tunnel is up.
+		if _, err = conn.Write(nil); err != nil {
+			conn = nil
+		}
 	}
 	return
 }
