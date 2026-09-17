@@ -9,13 +9,16 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/component/iface"
 	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -212,10 +215,17 @@ func (d *PeerDirectory) run() {
 }
 
 func (d *PeerDirectory) report(ctx context.Context) {
-	body, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"id":   d.option.ID,
 		"port": d.option.Port,
-	})
+	}
+	// The address this node knows about itself beats the one the directory
+	// observed: the report may travel through a proxy, and a peer has to dial
+	// the address the node actually holds.
+	if addr := pickReportAddress(localAddressesByInterface()); addr != "" {
+		payload["addr"] = addr
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
@@ -261,6 +271,49 @@ func (d *PeerDirectory) report(ctx context.Context) {
 	default:
 		d.logFailure("report rejected with %d", response.StatusCode)
 	}
+}
+
+// pickReportAddress chooses the address this node publishes: a peer has to dial
+// it, so a global unicast IPv6 on a real interface is the only useful answer.
+// Nothing is published when there is none, and the directory then falls back to
+// the address it observed for the report.
+func pickReportAddress(candidates map[string][]netip.Addr) string {
+	names := make([]string, 0, len(candidates))
+	for name := range candidates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		addrs := append([]netip.Addr(nil), candidates[name]...)
+		sort.Slice(addrs, func(i, j int) bool {
+			return addrs[i].Compare(addrs[j]) < 0
+		})
+		for _, addr := range addrs {
+			if dialableReportAddress(addr) {
+				return addr.String()
+			}
+		}
+	}
+	return ""
+}
+
+func dialableReportAddress(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	return addr.Is6() && addr.IsGlobalUnicast() && !addr.IsPrivate() && !addr.IsLoopback()
+}
+
+func localAddressesByInterface() map[string][]netip.Addr {
+	interfaces, err := iface.Interfaces()
+	if err != nil {
+		return nil
+	}
+	addresses := make(map[string][]netip.Addr, len(interfaces))
+	for name, item := range interfaces {
+		for _, prefix := range item.Addresses {
+			addresses[name] = append(addresses[name], prefix.Addr())
+		}
+	}
+	return addresses
 }
 
 func (d *PeerDirectory) authorize(request *http.Request) {

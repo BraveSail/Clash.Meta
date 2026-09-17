@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -177,5 +178,30 @@ func TestPeerDirectoryRejectsIncompleteOptions(t *testing.T) {
 	}
 	if _, err := NewPeerDirectory(PeerDirectoryOption{Name: "x", URL: "https://example.com", ID: "pc", Port: 70000}); err == nil {
 		t.Fatal("an invalid port was accepted")
+	}
+}
+
+func TestPickReportAddressPrefersAGlobalIpv6OnRealInterfaces(t *testing.T) {
+	candidates := map[string][]netip.Addr{
+		"tun0": {
+			netip.MustParseAddr("fdfe:dcba:9876::1"),
+			netip.MustParseAddr("127.0.0.1"),
+		},
+		"eth0": {
+			netip.MustParseAddr("fe80::1"),
+			netip.MustParseAddr("2409:8a55::2"),
+			netip.MustParseAddr("2409:8a55::1"),
+		},
+	}
+
+	if got := pickReportAddress(candidates); got != "2409:8a55::1" {
+		t.Fatalf("pickReportAddress = %q, want the lowest global IPv6", got)
+	}
+	onlyInternal := map[string][]netip.Addr{
+		"tun0": {netip.MustParseAddr("fdfe:dcba:9876::1")},
+		"eth0": {netip.MustParseAddr("fe80::1"), netip.MustParseAddr("192.168.1.2")},
+	}
+	if got := pickReportAddress(onlyInternal); got != "" {
+		t.Fatalf("pickReportAddress = %q, want nothing to publish", got)
 	}
 }
