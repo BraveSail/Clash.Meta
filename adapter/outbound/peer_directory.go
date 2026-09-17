@@ -128,6 +128,13 @@ func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int
 	}
 	addr, port, err := d.lookup(ctx, id)
 	if err != nil {
+		if ok {
+			// The directory is unreachable or the record expired: an address we
+			// saw a moment ago is still the best guess, and the caller's dial
+			// either works or fails into its own retry.
+			log.Debugln("[PeerDirectory](%s) lookup %s failed (%v); keeping %s from %s ago", d.Name(), id, err, cached.addr, time.Since(cached.at).Round(time.Second))
+			return cached.addr, cached.port, cached.self, nil
+		}
 		return "", 0, false, err
 	}
 	d.mu.Lock()

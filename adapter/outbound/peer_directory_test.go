@@ -15,6 +15,7 @@ import (
 type directoryStub struct {
 	reports  atomic.Int64
 	lookups  atomic.Int64
+	fail     atomic.Bool
 	lastEtag atomic.Value
 	lastBody atomic.Value
 }
@@ -48,6 +49,10 @@ func newDirectoryStub(t *testing.T, addr string) (*directoryStub, *httptest.Serv
 			})
 		case "/lookup":
 			stub.lookups.Add(1)
+			if stub.fail.Load() {
+				writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			id := request.URL.Query().Get("id")
 			if id != "gt7" {
 				writer.WriteHeader(http.StatusNotFound)
@@ -132,6 +137,14 @@ func TestPeerDirectoryLooksUpPeersAndAnswersForItself(t *testing.T) {
 	}
 	if _, _, _, err := directory.PeerAddress(ctx, "missing"); err == nil {
 		t.Fatal("an unknown peer resolved")
+	}
+
+	// A directory that stops answering must not break a peer we already saw.
+	stub.fail.Store(true)
+	time.Sleep(peerDirectoryLookupTTL)
+	addr, port, self, err = directory.PeerAddress(ctx, "gt7")
+	if err != nil || self || addr != "2409:895a::1" || port != 8443 {
+		t.Fatalf("stale lookup = %q %d self=%v err=%v", addr, port, self, err)
 	}
 }
 
