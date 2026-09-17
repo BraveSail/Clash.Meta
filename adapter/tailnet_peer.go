@@ -42,8 +42,12 @@ type TailnetPeerOption struct {
 	DirectoryIDByPlatform map[string]string `proxy:"directory-id-by-platform,omitempty"`
 	// DirectoryPeer is the name to ask the directory for; it defaults to [Peer],
 	// which may be an address the directory does not know.
-	DirectoryPeer string         `proxy:"directory-peer,omitempty"`
-	Proxy         map[string]any `proxy:"proxy"`
+	DirectoryPeer string `proxy:"directory-peer,omitempty"`
+	// Heartbeat is how often the directory client this outbound shares reports
+	// even when nothing changed, in seconds; the inline form of the directory
+	// takes the same option as a `peer-directory` outbound would.
+	Heartbeat int            `proxy:"heartbeat,omitempty"`
+	Proxy     map[string]any `proxy:"proxy"`
 }
 
 // directoryID is the name this node reports under: the app's own setting when it
@@ -102,11 +106,12 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 		log.Warnln("tailnet-peer: %s configures a directory but this device has no name for it", option.Name)
 	} else {
 		directory, err := acquireDirectoryClient(outbound.PeerDirectoryOption{
-			Name:  option.Name + " directory",
-			URL:   option.DirectoryURL,
-			Token: option.DirectoryToken,
-			ID:    option.directoryID(),
-			Port:  option.Port,
+			Name:      option.Name + " directory",
+			URL:       option.DirectoryURL,
+			Token:     option.DirectoryToken,
+			ID:        option.directoryID(),
+			Port:      option.Port,
+			Heartbeat: option.Heartbeat,
 		})
 		if err != nil {
 			return nil, err
