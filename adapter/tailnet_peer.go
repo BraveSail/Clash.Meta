@@ -156,7 +156,7 @@ func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err 
 
 	peer, isSelf, found := tailnet.ResolvePeer(ctx, t.option.Peer)
 	if !found {
-		return "", false, fmt.Errorf("tailnet-peer: no tailnet peer matches %q", t.option.Peer)
+		return "", false, fmt.Errorf("tailnet-peer: no tailnet peer matches %q (%s)", t.option.Peer, tailnet.DescribeProviders(ctx))
 	}
 	if isSelf {
 		t.storeResolved("", true)

@@ -27,6 +27,7 @@ type Status struct {
 }
 
 type NodeStatus struct {
+	ID                int64      `json:"nodeID,omitempty"`
 	Name              string     `json:"name"`
 	HostName          string     `json:"hostName,omitempty"`
 	DNSName           string     `json:"dnsName,omitempty"`

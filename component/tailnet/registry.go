@@ -2,6 +2,7 @@ package tailnet
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"strings"
 	"sync"
@@ -65,6 +66,33 @@ func ResolvePeer(ctx context.Context, name string) (peer NodeStatus, self bool, 
 		}
 	}
 	return NodeStatus{}, false, false
+}
+
+// DescribeProviders summarizes what the registered tailscale outbounds report,
+// so a lookup that finds nothing names its reason instead of only its query.
+func DescribeProviders(ctx context.Context) string {
+	providers := statusProviderSnapshot()
+	if len(providers) == 0 {
+		return "no tailscale outbound is registered"
+	}
+	described := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		status, err := provider.TailnetStatus(ctx)
+		if err != nil {
+			described = append(described, status.Proxy+": "+err.Error())
+			continue
+		}
+		peers := make([]string, 0, len(status.Peers))
+		for _, peer := range status.Peers {
+			peers = append(peers, fmt.Sprintf("%s=%s", peer.Name, strings.Join(peer.TailscaleIPs, ",")))
+		}
+		summary := fmt.Sprintf("%s: backend=%s peers=%d", status.Proxy, status.BackendState, len(status.Peers))
+		if len(peers) > 0 {
+			summary += " [" + strings.Join(peers, " ") + "]"
+		}
+		described = append(described, summary)
+	}
+	return strings.Join(described, "; ")
 }
 
 // OrderPeerAddresses returns the addresses to dial for a peer, best first: the

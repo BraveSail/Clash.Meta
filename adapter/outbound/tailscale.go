@@ -740,7 +740,35 @@ func (t *Tailscale) TailnetStatus(ctx context.Context) (tailnet.Status, error) {
 	if err != nil {
 		return tailnet.Status{Proxy: t.Name()}, err
 	}
-	return tailscaleStatusFromIPN(t.Name(), status), nil
+	result := tailscaleStatusFromIPN(t.Name(), status)
+	fillPeerEndpoints(ctx, lc, &result)
+	return result, nil
+}
+
+type peerNodeLookup interface {
+	PeerByID(ctx context.Context, id tailcfg.NodeID) (*tailcfg.Node, error)
+}
+
+// fillPeerEndpoints adds the endpoints each peer published. The status reports
+// endpoints for this node only, so a peer without a verified direct path has
+// none - and that published address is what the tailnet-peer outbound dials.
+func fillPeerEndpoints(ctx context.Context, lookup peerNodeLookup, status *tailnet.Status) {
+	for i := range status.Peers {
+		peer := &status.Peers[i]
+		if len(peer.Addrs) > 0 || peer.ID == 0 {
+			continue
+		}
+		node, err := lookup.PeerByID(ctx, tailcfg.NodeID(peer.ID))
+		if err != nil {
+			log.Debugln("[Tailscale] peer %s endpoints: %v", peer.Name, err)
+			continue
+		}
+		addrs := make([]string, 0, len(node.Endpoints))
+		for _, endpoint := range node.Endpoints {
+			addrs = append(addrs, endpoint.String())
+		}
+		peer.Addrs = addrs
+	}
 }
 
 func tailscaleStatusFromIPN(proxyName string, status *ipnstate.Status) tailnet.Status {
@@ -781,6 +809,7 @@ func tailscaleStatusFromIPN(proxyName string, status *ipnstate.Status) tailnet.S
 
 func tailscalePeerStatusToNode(peer *ipnstate.PeerStatus, magicDNSSuffix string, self bool) tailnet.NodeStatus {
 	node := tailnet.NodeStatus{
+		ID:                int64(peer.NodeID),
 		HostName:          peer.HostName,
 		DNSName:           peer.DNSName,
 		OS:                peer.OS,
