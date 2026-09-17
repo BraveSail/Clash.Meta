@@ -7,9 +7,6 @@ func Tags() (tags []string) {
 	if NoFakeTCP {
 		tags = append(tags, "no_fake_tcp")
 	}
-	if NoTailscale {
-		tags = append(tags, "no_tailscale")
-	}
 	if NoZeroTier {
 		tags = append(tags, "no_zerotier")
 	}

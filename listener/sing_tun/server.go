@@ -18,7 +18,6 @@ import (
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface"
 	"github.com/metacubex/mihomo/component/resolver"
-	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	LC "github.com/metacubex/mihomo/listener/config"
@@ -67,7 +66,6 @@ type Listener struct {
 	routeExcludeAddressSet   []*netipx.IPSet
 
 	systemDNSCancel          context.CancelFunc
-	tailnetSearchDomainClose io.Closer
 
 	dnsServerIp []string
 }
@@ -511,9 +509,7 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 	l.tunStack = tunStack
 	systemDNSCtx, systemDNSCancel := context.WithCancel(ctx)
 	l.systemDNSCancel = systemDNSCancel
-	l.tailnetSearchDomainClose = tailnet.RegisterSearchDomainCallback(func(domains []string) {
-		l.updateSystemDNSSearchDomains(systemDNSCtx, domains)
-	})
+	l.updateSystemDNSSearchDomains(systemDNSCtx)
 
 	if l.autoRedirect != nil {
 		if len(l.options.RouteAddressSet) > 0 && len(l.routeAddressSet) == 0 {
@@ -550,11 +546,9 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 	return
 }
 
-func (l *Listener) updateSystemDNSSearchDomains(ctx context.Context, tailnetDomains []string) {
-	domains := make([]string, 0, len(l.options.DNSSearchDomains)+len(tailnetDomains))
-	domains = append(domains, l.options.DNSSearchDomains...)
-	domains = append(domains, tailnetDomains...)
-	if len(tailnet.NormalizeSearchDomains(domains)) == 0 {
+func (l *Listener) updateSystemDNSSearchDomains(ctx context.Context) {
+	domains := l.options.DNSSearchDomains
+	if len(normalizeSearchDomains(domains)) == 0 {
 		return
 	}
 	configureSystemDNSSearchDomains(ctx, l.tunName, domains)
@@ -707,7 +701,6 @@ func (l *Listener) Close() error {
 		dialer.DefaultInterfaceFinder.CompareAndSwap(l.cDialerInterfaceFinder, nil)
 	}
 	return common.Close(
-		l.tailnetSearchDomainClose,
 		l.ruleUpdateCallbackCloser,
 		l.tunStack,
 		l.tunIf,

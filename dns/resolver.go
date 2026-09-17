@@ -10,7 +10,6 @@ import (
 	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/common/singleflight"
 	"github.com/metacubex/mihomo/component/resolver"
-	"github.com/metacubex/mihomo/component/tailnet"
 	"github.com/metacubex/mihomo/component/trie"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -271,9 +270,6 @@ func (r *Resolver) matchPolicy(m *D.Msg) []dnsClient {
 				return dnsClients
 			}
 		}
-	}
-	if proxyName, ok := tailnet.ProxyNameForDomain(domain); ok {
-		return []dnsClient{newTailscaleClient(proxyName)}
 	}
 	return nil
 }

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/metacubex/mihomo/component/tailnet"
+	"github.com/metacubex/mihomo/component/peerdirectory"
 )
 
 type directoryStub struct {
@@ -190,7 +190,7 @@ func TestPeerDirectoryRegistersItselfForPeersOutbounds(t *testing.T) {
 	_, server := newDirectoryStub(t, "2409:8a55::1")
 	directory := newTestDirectory(t, server.URL)
 
-	_, _, self, err := tailnet.LookupDirectoryPeer(context.Background(), "dir", "pc")
+	_, _, self, err := peerdirectory.Lookup(context.Background(), "dir", "pc")
 	if err != nil {
 		t.Fatalf("registered directory is not reachable: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestPeerDirectoryRegistersItselfForPeersOutbounds(t *testing.T) {
 	if err := directory.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := tailnet.LookupDirectoryPeer(context.Background(), "dir", "pc"); err == nil {
+	if _, _, _, err := peerdirectory.Lookup(context.Background(), "dir", "pc"); err == nil {
 		t.Fatal("a closed directory is still registered")
 	}
 }

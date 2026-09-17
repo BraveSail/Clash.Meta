@@ -51,7 +51,6 @@ const (
 	TrustTunnel
 	ShadowQuic
 	OpenVPN
-	Tailscale
 	ZeroTier
 	GostRelay
 	TailnetPeer
@@ -236,8 +235,6 @@ func (at AdapterType) String() string {
 		return "ShadowQuic"
 	case OpenVPN:
 		return "OpenVPN"
-	case Tailscale:
-		return "Tailscale"
 	case ZeroTier:
 		return "ZeroTier"
 	case TailnetPeer:

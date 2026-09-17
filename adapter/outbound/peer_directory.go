@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/component/iface"
-	"github.com/metacubex/mihomo/component/tailnet"
+	"github.com/metacubex/mihomo/component/peerdirectory"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 )
@@ -105,7 +105,7 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 		cancel: cancel,
 		peers:  map[string]cachedPeer{},
 	}
-	tailnet.RegisterDirectory(option.Name, directory)
+	peerdirectory.Register(option.Name, directory)
 	go directory.run()
 	return directory, nil
 }
@@ -362,6 +362,13 @@ func (d *PeerDirectory) resetWarning() {
 	d.mu.Unlock()
 }
 
+// InjectNetworkChange republishes this node now: a changed address is the one
+// reason a report leaves the machine, and the app knows about an interface
+// switch before the next poll does.
+func (d *PeerDirectory) InjectNetworkChange() {
+	go d.maybeReport(true)
+}
+
 func (d *PeerDirectory) Addr() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -386,6 +393,6 @@ func (d *PeerDirectory) ListenPacketContext(_ context.Context, _ *C.Metadata) (C
 
 func (d *PeerDirectory) Close() error {
 	d.cancel()
-	tailnet.UnregisterDirectory(d.option.Name, d)
+	peerdirectory.Unregister(d.option.Name, d)
 	return nil
 }

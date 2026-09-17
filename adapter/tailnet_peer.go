@@ -12,30 +12,26 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
-	"github.com/metacubex/mihomo/component/iface"
-	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 )
 
-// tailnetPeerResolveTTL keeps a burst of connections from re-reading the
-// tailscale status while still following a peer that changes networks.
+// tailnetPeerResolveTTL keeps a burst of connections from re-asking the
+// directory while still following a peer that changes networks.
 const tailnetPeerResolveTTL = 2 * time.Second
 
-// TailnetPeerOption dials a tailscale peer whose underlay address changes. The
-// inner `proxy` configuration supplies the protocol; its `server` and `port`
-// are replaced with the peer's current address.
+// TailnetPeerOption dials a peer whose underlay address changes. The inner
+// `proxy` configuration supplies the protocol; its `server` and `port` are
+// replaced with the address the directory reports for the peer.
 type TailnetPeerOption struct {
 	outbound.BasicOption
 	Name string `proxy:"name"`
 	Peer string `proxy:"peer"`
 	Port int    `proxy:"port"`
-	// Directory names another outbound that answers the peer's address.
-	Directory string `proxy:"directory,omitempty"`
-	// DirectoryURL and DirectoryToken configure that directory inline instead,
-	// with DirectoryID naming this node in it. A build that predates these
-	// fields simply ignores them, so a shared profile can carry them before
-	// every device is updated.
+	// DirectoryURL and DirectoryToken configure the directory this outbound
+	// asks, with DirectoryID naming this node in it. A build that predates
+	// these fields simply ignores them, so a shared profile can carry them
+	// before every device is updated.
 	DirectoryURL   string `proxy:"directory-url,omitempty"`
 	DirectoryToken string `proxy:"directory-token,omitempty"`
 	DirectoryID    string `proxy:"directory-id,omitempty"`
@@ -45,7 +41,7 @@ type TailnetPeerOption struct {
 	// fills from its own setting, wins when both are present.
 	DirectoryIDByPlatform map[string]string `proxy:"directory-id-by-platform,omitempty"`
 	// DirectoryPeer is the name to ask the directory for; it defaults to [Peer],
-	// which may be a tailscale address the directory does not know.
+	// which may be an address the directory does not know.
 	DirectoryPeer string         `proxy:"directory-peer,omitempty"`
 	Proxy         map[string]any `proxy:"proxy"`
 }
@@ -86,6 +82,9 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 	if len(option.Proxy) == 0 {
 		return nil, errors.New("tailnet-peer: proxy is required")
 	}
+	if option.DirectoryURL == "" {
+		return nil, fmt.Errorf("tailnet-peer: %s needs directory-url, the peer directory that names this node", option.Name)
+	}
 	peer := &TailnetPeer{
 		Base: outbound.NewBase(outbound.BaseOption{
 			Name:         option.Name,
@@ -97,25 +96,22 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 		option: option,
 		direct: NewProxy(outbound.NewDirect()),
 	}
-	if option.DirectoryURL != "" {
-		if option.directoryID() == "" {
-			// The profile asks for the directory but this device was never told
-			// which node it is: say so instead of quietly resolving somewhere
-			// else.
-			log.Warnln("tailnet-peer: %s configures a directory but this device has no name for it", option.Name)
-		} else {
-			directory, err := acquireDirectoryClient(outbound.PeerDirectoryOption{
-				Name:  option.Name + " directory",
-				URL:   option.DirectoryURL,
-				Token: option.DirectoryToken,
-				ID:    option.directoryID(),
-				Port:  option.Port,
-			})
-			if err != nil {
-				return nil, err
-			}
-			peer.directory = directory
+	if option.directoryID() == "" {
+		// The profile asks for the directory but this device was never told
+		// which node it is: say so instead of quietly resolving somewhere else.
+		log.Warnln("tailnet-peer: %s configures a directory but this device has no name for it", option.Name)
+	} else {
+		directory, err := acquireDirectoryClient(outbound.PeerDirectoryOption{
+			Name:  option.Name + " directory",
+			URL:   option.DirectoryURL,
+			Token: option.DirectoryToken,
+			ID:    option.directoryID(),
+			Port:  option.Port,
+		})
+		if err != nil {
+			return nil, err
 		}
+		peer.directory = directory
 	}
 	inner, err := peer.buildInner("")
 	if err != nil {
@@ -264,34 +260,7 @@ func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err 
 		)
 	}
 
-	if t.option.Directory != "" {
-		addr, _, self, err := tailnet.LookupDirectoryPeer(ctx, t.option.Directory, t.directoryNameKey())
-		if err != nil {
-			return "", false, fmt.Errorf("tailnet-peer: %w", err)
-		}
-		if self {
-			t.storeResolved("", true)
-			return "", true, nil
-		}
-		t.storeResolved(addr, false)
-		return addr, false, nil
-	}
-
-	peer, isSelf, found := tailnet.ResolvePeer(ctx, t.option.Peer)
-	if !found {
-		return "", false, fmt.Errorf("tailnet-peer: no tailnet peer matches %q (%s)", t.option.Peer, tailnet.DescribeProviders(ctx))
-	}
-	if isSelf {
-		t.storeResolved("", true)
-		return "", true, nil
-	}
-	addresses := tailnet.OrderPeerAddresses(peer, localIPv6Prefixes())
-	if len(addresses) == 0 {
-		return "", false, fmt.Errorf("tailnet-peer: peer %q has no dialable address", t.option.Peer)
-	}
-	host = addresses[0].String()
-	t.storeResolved(host, false)
-	return host, false, nil
+	return "", false, fmt.Errorf("tailnet-peer: %s has no peer directory to ask", t.option.Name)
 }
 
 func (t *TailnetPeer) storeResolved(host string, self bool) {
@@ -312,22 +281,6 @@ func (t *TailnetPeer) innerProxy() C.Proxy {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.inner
-}
-
-func localIPv6Prefixes() []netip.Prefix {
-	interfaces, err := iface.Interfaces()
-	if err != nil {
-		return nil
-	}
-	var prefixes []netip.Prefix
-	for _, item := range interfaces {
-		for _, prefix := range item.Addresses {
-			if prefix.Addr().Is6() {
-				prefixes = append(prefixes, netip.PrefixFrom(prefix.Addr(), 64).Masked())
-			}
-		}
-	}
-	return prefixes
 }
 
 func (t *TailnetPeer) Addr() string {

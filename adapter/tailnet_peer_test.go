@@ -8,12 +8,12 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/metacubex/mihomo/component/resolver"
-	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 )
 
@@ -29,29 +29,6 @@ func TestDirectoryIDPrefersTheDeviceSettingOverThePlatformMap(t *testing.T) {
 	}
 }
 
-type stubTailnetProvider struct {
-	status tailnet.Status
-}
-
-func (s *stubTailnetProvider) TailnetStatus(context.Context) (tailnet.Status, error) {
-	return s.status, nil
-}
-
-func testTailnetPeer(t *testing.T, peer string, port int) *TailnetPeer {
-	t.Helper()
-	created, err := NewTailnetPeer(TailnetPeerOption{
-		Name:  "pc",
-		Peer:  peer,
-		Port:  port,
-		Proxy: map[string]any{"type": "direct", "name": "inner"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = created.Close() })
-	return created
-}
-
 func TestTailnetPeerRejectsIncompleteOptions(t *testing.T) {
 	if _, err := NewTailnetPeer(TailnetPeerOption{Name: "x", Port: 1, Proxy: map[string]any{"type": "direct"}}); err == nil {
 		t.Fatal("missing peer accepted")
@@ -62,29 +39,86 @@ func TestTailnetPeerRejectsIncompleteOptions(t *testing.T) {
 	if _, err := NewTailnetPeer(TailnetPeerOption{Name: "x", Peer: "pc", Port: 1}); err == nil {
 		t.Fatal("missing proxy accepted")
 	}
+	if _, err := NewTailnetPeer(TailnetPeerOption{Name: "x", Peer: "pc", Port: 1, Proxy: map[string]any{"type": "direct"}}); err == nil {
+		t.Fatal("missing directory accepted")
+	}
 }
 
-func TestTailnetPeerResolvesAddressAndFollowsChanges(t *testing.T) {
-	provider := &stubTailnetProvider{status: tailnet.Status{
-		Peers: []tailnet.NodeStatus{{
-			Name:           "pc",
-			TailscaleIPs:   []string{"100.64.0.5"},
-			Addrs:          []string{"[2409:8a55:aaaa::1]:41641"},
-			CurAddr:        "[2409:8a55:aaaa::1]:41641",
-			DirectVerified: true,
-		}},
-	}}
-	tailnet.RegisterStatusProvider("ts", provider)
-	t.Cleanup(func() { tailnet.UnregisterStatusProvider("ts", provider) })
+// stubDirectory is a directory service: it answers where [peerID] is with the
+// address the test last set, and counts the reports this node sent.
+type stubDirectory struct {
+	mu       sync.Mutex
+	ownID    string
+	peerID   string
+	peerAddr string
+	reports  atomic.Int64
+}
 
-	peer := testTailnetPeer(t, "pc", 23333)
+func (s *stubDirectory) serve() *httptest.Server {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/report":
+			s.reports.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"id":      s.ownID,
+				"addr":    "2409:8a55::1",
+				"port":    8443,
+				"changed": true,
+			})
+		case "/lookup":
+			if request.URL.Query().Get("id") != s.peerID {
+				writer.WriteHeader(http.StatusNotFound)
+				return
+			}
+			s.mu.Lock()
+			addr := s.peerAddr
+			s.mu.Unlock()
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"nodes": map[string]any{
+					s.peerID: map[string]any{"addr": addr, "port": 8443},
+				},
+			})
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	return server
+}
 
-	host, self, err := peer.resolve(context.Background())
+func (s *stubDirectory) movePeer(addr string) {
+	s.mu.Lock()
+	s.peerAddr = addr
+	s.mu.Unlock()
+}
+
+func newTestPeer(t *testing.T, option TailnetPeerOption) *TailnetPeer {
+	t.Helper()
+	created, err := NewTailnetPeer(option)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if self || host != "2409:8a55:aaaa::1" {
-		t.Fatalf("resolve = %q self=%v, want the verified address", host, self)
+	t.Cleanup(func() { _ = created.Close() })
+	return created
+}
+
+func TestTailnetPeerResolvesThroughTheDirectory(t *testing.T) {
+	stub := &stubDirectory{ownID: "pc", peerID: "gt7", peerAddr: "2409:895a::1"}
+	server := stub.serve()
+	t.Cleanup(server.Close)
+
+	peer := newTestPeer(t, TailnetPeerOption{
+		Name:           "gt7",
+		Peer:           "gt7",
+		Port:           23333,
+		Proxy:          map[string]any{"type": "direct", "name": "inner"},
+		DirectoryURL:   server.URL,
+		DirectoryToken: "secret",
+		DirectoryID:    "pc",
+	})
+
+	host, self, err := peer.resolve(context.Background())
+	if err != nil || self || host != "2409:895a::1" {
+		t.Fatalf("resolve = %q self=%v err=%v", host, self, err)
 	}
 
 	proxy, err := peer.proxyForDial(context.Background())
@@ -94,31 +128,39 @@ func TestTailnetPeerResolvesAddressAndFollowsChanges(t *testing.T) {
 	if proxy.Type() != C.Direct {
 		t.Fatalf("inner proxy type = %v, want the configured inner type", proxy.Type())
 	}
-	if got := peer.Addr(); got != "2409:8a55:aaaa::1:23333" {
-		t.Fatalf("Addr() = %q, want the resolved address", got)
+	if got := peer.Addr(); got != "2409:895a::1:23333" {
+		t.Fatalf("Addr() = %q, want the resolved address and this outbound's port", got)
 	}
 
-	provider.status.Peers[0].Addrs = []string{"[2409:8a55:ffff::9]:41641"}
-	provider.status.Peers[0].CurAddr = "[2409:8a55:ffff::9]:41641"
+	stub.movePeer("2409:895a::9")
+	// Both the outbound and the directory client cache for a moment, so the
+	// next connection after that window dials the new address.
+	time.Sleep(2300 * time.Millisecond)
 	peer.invalidate()
-
 	host, _, err = peer.resolve(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if host != "2409:8a55:ffff::9" {
-		t.Fatalf("resolve after change = %q, want the new address", host)
+	if err != nil || host != "2409:895a::9" {
+		t.Fatalf("resolve after the peer moved = %q err=%v", host, err)
 	}
 }
 
 func TestTailnetPeerDegradesToDirectForItself(t *testing.T) {
-	provider := &stubTailnetProvider{status: tailnet.Status{
-		Self: &tailnet.NodeStatus{Name: "pc", HostName: "pc"},
-	}}
-	tailnet.RegisterStatusProvider("ts", provider)
-	t.Cleanup(func() { tailnet.UnregisterStatusProvider("ts", provider) })
+	stub := &stubDirectory{ownID: "pc", peerID: "gt7", peerAddr: "2409:895a::1"}
+	server := stub.serve()
+	t.Cleanup(server.Close)
 
-	peer := testTailnetPeer(t, "pc", 23333)
+	peer := newTestPeer(t, TailnetPeerOption{
+		Name:         "pc",
+		Peer:         "pc",
+		Port:         23333,
+		Proxy:        map[string]any{"type": "direct", "name": "inner"},
+		DirectoryURL: server.URL,
+		DirectoryID:  "pc",
+	})
+
+	host, self, err := peer.resolve(context.Background())
+	if err != nil || !self || host != "" {
+		t.Fatalf("resolve(self) = %q self=%v err=%v", host, self, err)
+	}
 	proxy, err := peer.proxyForDial(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -128,70 +170,47 @@ func TestTailnetPeerDegradesToDirectForItself(t *testing.T) {
 	}
 }
 
-func TestTailnetPeerMissingPeerFails(t *testing.T) {
-	peer := testTailnetPeer(t, "nobody", 23333)
+func TestTailnetPeerWithoutADirectoryNameFails(t *testing.T) {
+	stub := &stubDirectory{ownID: "pc", peerID: "gt7", peerAddr: "2409:895a::1"}
+	server := stub.serve()
+	t.Cleanup(server.Close)
+
+	// directory-id-by-platform names a different platform, so this device has
+	// no name: the outbound refuses instead of resolving somewhere else.
+	peer := newTestPeer(t, TailnetPeerOption{
+		Name:                  "gt7",
+		Peer:                  "gt7",
+		Port:                  23333,
+		Proxy:                 map[string]any{"type": "direct", "name": "inner"},
+		DirectoryURL:          server.URL,
+		DirectoryIDByPlatform: map[string]string{"plan9": "gt7"},
+	})
+	if _, _, err := peer.resolve(context.Background()); err == nil {
+		t.Fatal("a device without a directory name resolved a peer")
+	}
+}
+
+func TestTailnetPeerUnknownPeerFails(t *testing.T) {
+	stub := &stubDirectory{ownID: "pc", peerID: "gt7", peerAddr: "2409:895a::1"}
+	server := stub.serve()
+	t.Cleanup(server.Close)
+
+	peer := newTestPeer(t, TailnetPeerOption{
+		Name:         "nobody",
+		Peer:         "nobody",
+		Port:         23333,
+		Proxy:        map[string]any{"type": "direct", "name": "inner"},
+		DirectoryURL: server.URL,
+		DirectoryID:  "pc",
+	})
 	if _, _, err := peer.resolve(context.Background()); err == nil {
 		t.Fatal("unknown peer resolved")
 	}
 }
 
-type stubDirectory struct {
-	addr string
-	port int
-	self bool
-}
-
-func (s stubDirectory) PeerAddress(context.Context, string) (string, int, bool, error) {
-	return s.addr, s.port, s.self, nil
-}
-
-// With a directory outbound the address comes from the Cloudflare directory
-// instead of a tailscale status, and the same self shortcut applies.
-func TestTailnetPeerResolvesThroughDirectory(t *testing.T) {
-	directory := stubDirectory{addr: "2409:8a55:d0a4:5500::9", port: 8443}
-	tailnet.RegisterDirectory("dir", directory)
-	t.Cleanup(func() { tailnet.UnregisterDirectory("dir", directory) })
-
-	created, err := NewTailnetPeer(TailnetPeerOption{
-		Name:      "pc",
-		Peer:      "pc",
-		Port:      23333,
-		Proxy:     map[string]any{"type": "direct", "name": "inner"},
-		Directory: "dir",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = created.Close() })
-
-	host, self, err := created.resolve(context.Background())
-	if err != nil || self || host != "2409:8a55:d0a4:5500::9" {
-		t.Fatalf("resolve = %q self=%v err=%v", host, self, err)
-	}
-
-	selfDirectory := stubDirectory{self: true}
-	tailnet.RegisterDirectory("self", selfDirectory)
-	t.Cleanup(func() { tailnet.UnregisterDirectory("self", selfDirectory) })
-	created, err = NewTailnetPeer(TailnetPeerOption{
-		Name:      "gt7",
-		Peer:      "gt7",
-		Port:      23333,
-		Proxy:     map[string]any{"type": "direct", "name": "inner"},
-		Directory: "self",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = created.Close() })
-	host, self, err = created.resolve(context.Background())
-	if err != nil || !self || host != "" {
-		t.Fatalf("resolve(self) = %q self=%v err=%v", host, self, err)
-	}
-}
-
-// A service that this node runs is reachable on the loopback address: dialing
-// the destination as it stands would come back through the rule that selected
-// this outbound.
+// A peer that is this node is reachable on the loopback address: dialing the
+// destination as it stands would come back through the rule that selected this
+// outbound.
 func TestTailnetPeerDialsLocalServiceForItself(t *testing.T) {
 	previousIPv6 := resolver.DisableIPv6
 	resolver.DisableIPv6 = false
@@ -212,14 +231,20 @@ func TestTailnetPeerDialsLocalServiceForItself(t *testing.T) {
 		_, _ = conn.Write([]byte("local"))
 	}()
 
-	self := netip.MustParseAddr("fd7a:115c:a1e0::f638:aa6c")
-	provider := &stubTailnetProvider{status: tailnet.Status{
-		Self: &tailnet.NodeStatus{Name: "pc", HostName: "pc", TailscaleIPs: []string{self.String()}},
-	}}
-	tailnet.RegisterStatusProvider("ts", provider)
-	t.Cleanup(func() { tailnet.UnregisterStatusProvider("ts", provider) })
+	stub := &stubDirectory{ownID: "pc", peerID: "gt7", peerAddr: "2409:895a::1"}
+	server := stub.serve()
+	t.Cleanup(server.Close)
 
-	peer := testTailnetPeer(t, self.String(), int(port))
+	self := netip.MustParseAddr("fd7a:115c:a1e0::f638:aa6c")
+	peer := newTestPeer(t, TailnetPeerOption{
+		Name:         "self",
+		Peer:         "self",
+		Port:         int(port),
+		Proxy:        map[string]any{"type": "direct", "name": "inner"},
+		DirectoryURL: server.URL,
+		DirectoryID:  "self",
+	})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := peer.DialContext(ctx, &C.Metadata{
@@ -244,75 +269,33 @@ func TestTailnetPeerDialsLocalServiceForItself(t *testing.T) {
 	}
 }
 
-type stubDirectoryServer struct {
-	reports atomic.Int64
-	ownID   string
-	peerID  string
-	peer    string
-}
-
-func newStubDirectoryServer(t *testing.T, ownID, peerID, peerAddr string) (*stubDirectoryServer, *httptest.Server) {
-	t.Helper()
-	stub := &stubDirectoryServer{ownID: ownID, peerID: peerID, peer: peerAddr}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/report":
-			stub.reports.Add(1)
-			_ = json.NewEncoder(writer).Encode(map[string]any{
-				"id":      stub.ownID,
-				"addr":    "2409:8a55::1",
-				"port":    8443,
-				"changed": true,
-			})
-		case "/lookup":
-			if request.URL.Query().Get("id") != stub.peerID {
-				writer.WriteHeader(http.StatusNotFound)
-				return
-			}
-			_ = json.NewEncoder(writer).Encode(map[string]any{
-				"nodes": map[string]any{
-					stub.peerID: map[string]any{"addr": stub.peer, "port": 8443},
-				},
-			})
-		default:
-			writer.WriteHeader(http.StatusNotFound)
-		}
-	}))
+// A shared profile lists one outbound per node, so both peers in one config ask
+// the same directory: the client is shared and this node reports itself once.
+func TestTailnetPeersShareOneDirectoryClient(t *testing.T) {
+	stub := &stubDirectory{ownID: "pc", peerID: "gt7", peerAddr: "2409:895a::1"}
+	server := stub.serve()
 	t.Cleanup(server.Close)
-	return stub, server
-}
 
-// A peer may carry the directory inline, which lets a shared profile list the
-// directory before every device runs a build that knows the fields.
-func TestTailnetPeerResolvesThroughAnInlineDirectory(t *testing.T) {
-	stub, server := newStubDirectoryServer(t, "pc", "gt7", "2409:895a::1")
-
-	create := func(peer string) *TailnetPeer {
-		created, err := NewTailnetPeer(TailnetPeerOption{
-			Name:           peer,
-			Peer:           peer,
+	for _, name := range []string{"gt7", "pc"} {
+		peer := newTestPeer(t, TailnetPeerOption{
+			Name:           name,
+			Peer:           name,
 			Port:           8443,
 			Proxy:          map[string]any{"type": "direct", "name": "inner"},
 			DirectoryURL:   server.URL,
 			DirectoryToken: "secret",
 			DirectoryID:    "pc",
 		})
-		if err != nil {
+		if _, _, err := peer.resolve(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = created.Close() })
-		return created
 	}
-
-	host, self, err := create("gt7").resolve(context.Background())
-	if err != nil || self || host != "2409:895a::1" {
-		t.Fatalf("resolve = %q self=%v err=%v", host, self, err)
+	// The first report leaves the machine from the outbound's own goroutine.
+	deadline := time.Now().Add(2 * time.Second)
+	for stub.reports.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
 	}
-	host, self, err = create("pc").resolve(context.Background())
-	if err != nil || !self || host != "" {
-		t.Fatalf("resolve(self) = %q self=%v err=%v", host, self, err)
-	}
-	// Both peers share one client, so this node reports itself once.
+	time.Sleep(200 * time.Millisecond)
 	if reports := stub.reports.Load(); reports != 1 {
 		t.Fatalf("reports = %d, want one client per node", reports)
 	}
