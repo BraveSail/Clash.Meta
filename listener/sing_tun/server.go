@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -618,6 +619,7 @@ func (l *Listener) OnReload() {
 type cDialerInterfaceFinder struct {
 	tunName                 string
 	defaultInterfaceMonitor tun.DefaultInterfaceMonitor
+	lastKnownName           atomic.Value
 }
 
 func (d *cDialerInterfaceFinder) DefaultInterfaceName(destination netip.Addr) string {
@@ -625,7 +627,21 @@ func (d *cDialerInterfaceFinder) DefaultInterfaceName(destination netip.Addr) st
 		return netInterface.Name
 	}
 	if netInterface := d.defaultInterfaceMonitor.DefaultInterface(); netInterface != nil {
+		if netInterface.Name != "" {
+			d.lastKnownName.Store(netInterface.Name)
+		}
 		return netInterface.Name
+	}
+	// The monitor drops its interface when the OS reports no default route —
+	// disabling and re-enabling a NIC, for instance — and it may never report
+	// that same interface again. Keep dialing through the last one it named,
+	// as long as it still exists: returning "" makes the caller bind
+	// "<invalid>" and fails every connection until the monitor recovers.
+	if name, _ := d.lastKnownName.Load().(string); name != "" && name != d.tunName {
+		iface.FlushCache()
+		if _, err := iface.ResolveInterface(name); err == nil {
+			return name
+		}
 	}
 	return ""
 }
