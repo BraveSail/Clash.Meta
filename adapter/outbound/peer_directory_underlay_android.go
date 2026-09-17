@@ -108,7 +108,7 @@ func (d *PeerDirectory) probeUnderlayInterface() (netip.Addr, string) {
 			log.Debugln("[PeerDirectory](%s) underlay probe: source %s resolved to no interface: %v", d.Name(), addr, err)
 			continue
 		}
-		if underlayVirtualInterface(ifc.Name) {
+		if isVirtualInterfaceName(ifc.Name) {
 			log.Debugln("[PeerDirectory](%s) underlay probe: source %s sits on virtual interface %s; trying the next anchor",
 				d.Name(), addr, ifc.Name)
 			continue

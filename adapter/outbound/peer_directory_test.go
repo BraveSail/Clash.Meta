@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -209,20 +210,31 @@ func TestPeerDirectoryHeartbeatsWhenTheAddressIsUnchanged(t *testing.T) {
 	}
 }
 
-// The probe tells the tunnel interfaces apart from the NIC carrying traffic: a
-// protected socket must never resolve to the VPN this outbound runs inside.
-func TestUnderlayVirtualInterface(t *testing.T) {
-	for _, name := range []string{"tun0", "utun3", "tap0", "wg0", "tailscale0", "ppp0", "ipsec0", "lo", "lo0"} {
-		if !underlayVirtualInterface(name) {
+// The decision layer tells tunnel interfaces apart from the NIC carrying
+// traffic; a protected socket must never resolve to the VPN this outbound runs
+// inside.
+func TestIsVirtualInterfaceName(t *testing.T) {
+	for _, name := range []string{"tun0", "utun3", "tap0", "wg0", "tailscale0", "ppp0", "ipsec0"} {
+		if !isVirtualInterfaceName(name) {
 			t.Fatalf("%q is a tunnel or loopback, want it refused", name)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		// Windows names its loopback "Loopback Pseudo-Interface 1" and refuses
+		// it by adapter type, so the Unix names are not in this list.
+		for _, name := range []string{"lo", "lo0"} {
+			if !isVirtualInterfaceName(name) {
+				t.Fatalf("%q is the loopback, want it refused", name)
+			}
 		}
 	}
 	// A Windows wintun adapter is named after the application that made it
 	// ("FlClash", "Meta"), so a name check cannot spot it; Windows classifies
 	// those by adapter type and description instead (see
-	// peer_directory_virtual_windows.go).
-	for _, name := range []string{"Ethernet", "以太网", "WLAN", "wlan0", "rmnet_data0", "en0", "eth0", "Meta", "FlClash"} {
-		if underlayVirtualInterface(name) {
+	// peer_directory_virtual_windows.go), which is why those names are not in
+	// this list: the answer depends on the adapters the machine actually has.
+	for _, name := range []string{"Ethernet", "以太网", "WLAN", "wlan0", "rmnet_data0", "en0", "eth0"} {
+		if isVirtualInterfaceName(name) {
 			t.Fatalf("%q carries traffic, want it accepted", name)
 		}
 	}

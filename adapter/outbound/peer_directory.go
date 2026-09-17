@@ -245,20 +245,9 @@ func (d *PeerDirectory) run() {
 // heartbeat so the directory can tell a quiet node from an absent one.
 func (d *PeerDirectory) maybeReport(force bool) {
 	candidates := localAddressesByInterface()
-	addr := pickReportAddress(candidates)
-	source := "interface scan"
-	// An interface scan reports every physical NIC, including the SIM that is
-	// idle; the interface carrying traffic is the one to publish. Android can
-	// only learn that from a protected socket, so it keeps the probe's answer
-	// while every other platform reads the routing table itself.
-	if probed, probeInterface := d.underlay(); probeInterface != "" {
-		if dialableReportAddress(probed) {
-			addr = probed.String()
-			source = "probe on " + probeInterface
-		} else {
-			source = "interface scan (" + probeInterface + " carries no dialable IPv6)"
-		}
-	}
+	// Which interface carries traffic decides what to publish: an interface
+	// scan alone reports every physical NIC, including the SIM that is idle.
+	addr, ifaceName, how := d.chooseReportAddress(candidates)
 	d.mu.Lock()
 	previous := d.sentAddr
 	unchanged := !force &&
@@ -280,10 +269,11 @@ func (d *PeerDirectory) maybeReport(force bool) {
 	case addr != "" && previous == "":
 		log.Infoln("[PeerDirectory](%s) %s publishes %s again", d.Name(), d.option.ID, addr)
 	}
-	// What the core can see and what it decided to publish: this is the line
-	// that answers "did it notice the network changed?" without guesswork.
-	log.Debugln("[PeerDirectory](%s) address candidates %s -> %s",
-		d.Name(), describeCandidates(candidates), orNone(addr)+" ("+source+")")
+	// What the core can see, what it chose and how: this is the line that
+	// answers "did it notice the network changed?" without guesswork, and it is
+	// where the fork's kept/dropped decision trace lives now.
+	log.Debugln("[PeerDirectory](%s) address candidates %s -> %s (via=%s, iface=%s)",
+		d.Name(), describeCandidates(candidates), orNone(addr), how, orNone(ifaceName))
 	d.report(d.ctx, addr)
 }
 
@@ -306,23 +296,6 @@ func (d *PeerDirectory) storeUnderlay(addr netip.Addr, name string) {
 	if changed && name != "" {
 		log.Infoln("[PeerDirectory](%s) underlay interface: %s (%s); publishing from it", d.Name(), name, addr)
 	}
-}
-
-// underlayVirtualInterface reports whether name looks like a tunnel or loopback
-// rather than the physical NIC carrying traffic.
-func underlayVirtualInterface(name string) bool {
-	n := strings.ToLower(name)
-	if n == "lo" || (strings.HasPrefix(n, "lo") && len(n) > 2) {
-		return true
-	}
-	// The prefixes the tailscale fork's filter used, plus "tailscale" itself: a
-	// leftover tailscale interface is a VPN tunnel like any other here.
-	for _, prefix := range []string{"tun", "utun", "tap", "wg", "ppp", "ipsec", "tailscale"} {
-		if strings.HasPrefix(n, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // describeCandidates lists the IPv6 addresses the core can see, per interface,
