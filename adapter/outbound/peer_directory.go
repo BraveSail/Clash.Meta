@@ -64,15 +64,19 @@ type PeerDirectory struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu         sync.Mutex
-	etag       string
-	addr       string
-	sentAddr   string
-	sentPort   int
-	sentAt     time.Time
-	heartbeat  time.Duration
-	peers      map[string]cachedPeer
-	warnedOnce bool
+	mu   sync.Mutex
+	etag string
+	addr string
+	// underlayAddr is the address of the network carrying traffic; only
+	// Android maintains it (see peer_directory_underlay_android.go).
+	underlayAddr      netip.Addr
+	underlayInterface string
+	sentAddr          string
+	sentPort          int
+	sentAt            time.Time
+	heartbeat         time.Duration
+	peers             map[string]cachedPeer
+	warnedOnce        bool
 }
 
 type cachedPeer struct {
@@ -124,6 +128,7 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 	}
 	peerdirectory.Register(option.Name, directory)
 	log.Debugln("[PeerDirectory](%s) reporting as %s every %s when nothing changes", option.Name, option.ID, heartbeat)
+	go directory.startUnderlayWatch()
 	go directory.run()
 	return directory, nil
 }
@@ -239,7 +244,21 @@ func (d *PeerDirectory) run() {
 // time, after the address this node would publish changes, and once every
 // heartbeat so the directory can tell a quiet node from an absent one.
 func (d *PeerDirectory) maybeReport(force bool) {
-	addr := pickReportAddress(localAddressesByInterface())
+	candidates := localAddressesByInterface()
+	addr := pickReportAddress(candidates)
+	source := "interface scan"
+	// An interface scan reports every physical NIC, including the SIM that is
+	// idle; the interface carrying traffic is the one to publish. Android can
+	// only learn that from a protected socket, so it keeps the probe's answer
+	// while every other platform reads the routing table itself.
+	if probed, probeInterface := d.underlay(); probeInterface != "" {
+		if dialableReportAddress(probed) {
+			addr = probed.String()
+			source = "probe on " + probeInterface
+		} else {
+			source = "interface scan (" + probeInterface + " carries no dialable IPv6)"
+		}
+	}
 	d.mu.Lock()
 	previous := d.sentAddr
 	unchanged := !force &&
@@ -261,7 +280,82 @@ func (d *PeerDirectory) maybeReport(force bool) {
 	case addr != "" && previous == "":
 		log.Infoln("[PeerDirectory](%s) %s publishes %s again", d.Name(), d.option.ID, addr)
 	}
+	// What the core can see and what it decided to publish: this is the line
+	// that answers "did it notice the network changed?" without guesswork.
+	log.Debugln("[PeerDirectory](%s) address candidates %s -> %s",
+		d.Name(), describeCandidates(candidates), orNone(addr)+" ("+source+")")
 	d.report(d.ctx, addr)
+}
+
+// underlay is the address and interface of the network currently carrying
+// traffic, as far as the platform can tell. Android fills it from a probe (see
+// peer_directory_underlay_android.go); elsewhere it stays empty and the
+// interface scan answers.
+func (d *PeerDirectory) underlay() (netip.Addr, string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.underlayAddr, d.underlayInterface
+}
+
+func (d *PeerDirectory) storeUnderlay(addr netip.Addr, name string) {
+	d.mu.Lock()
+	changed := name != d.underlayInterface || addr != d.underlayAddr
+	d.underlayAddr = addr
+	d.underlayInterface = name
+	d.mu.Unlock()
+	if changed && name != "" {
+		log.Infoln("[PeerDirectory](%s) underlay interface: %s (%s); publishing from it", d.Name(), name, addr)
+	}
+}
+
+// underlayVirtualInterface reports whether name looks like a tunnel or loopback
+// rather than the physical NIC carrying traffic.
+func underlayVirtualInterface(name string) bool {
+	n := strings.ToLower(name)
+	if n == "lo" || (strings.HasPrefix(n, "lo") && len(n) > 2) {
+		return true
+	}
+	// The prefixes the tailscale fork's filter used, plus "tailscale" itself: a
+	// leftover tailscale interface is a VPN tunnel like any other here.
+	for _, prefix := range []string{"tun", "utun", "tap", "wg", "ppp", "ipsec", "tailscale"} {
+		if strings.HasPrefix(n, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// describeCandidates lists the IPv6 addresses the core can see, per interface,
+// so a log says which networks it is looking at rather than only what it chose.
+func describeCandidates(candidates map[string][]netip.Addr) string {
+	names := make([]string, 0, len(candidates))
+	for name := range candidates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		addrs := make([]string, 0, len(candidates[name]))
+		for _, addr := range candidates[name] {
+			if addr.Is6() {
+				addrs = append(addrs, addr.String())
+			}
+		}
+		if len(addrs) > 0 {
+			parts = append(parts, name+"=["+strings.Join(addrs, " ")+"]")
+		}
+	}
+	if len(parts) == 0 {
+		return "(no IPv6 on any interface)"
+	}
+	return strings.Join(parts, " ")
+}
+
+func orNone(addr string) string {
+	if addr == "" {
+		return "(nothing to publish)"
+	}
+	return addr
 }
 
 func (d *PeerDirectory) report(ctx context.Context, addr string) {
@@ -424,6 +518,10 @@ func (d *PeerDirectory) resetWarning() {
 // reason a report leaves the machine, and the app knows about an interface
 // switch before the next poll does.
 func (d *PeerDirectory) InjectNetworkChange() {
+	// Refresh the underlay answer first: a network change is exactly when the
+	// interface carrying traffic moves, and the report that follows should name
+	// the new one rather than wait for the next probe.
+	d.refreshUnderlayInterface("network change")
 	go d.maybeReport(true)
 }
 
