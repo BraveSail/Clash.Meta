@@ -123,6 +123,7 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 		peers:     map[string]cachedPeer{},
 	}
 	peerdirectory.Register(option.Name, directory)
+	log.Debugln("[PeerDirectory](%s) reporting as %s every %s when nothing changes", option.Name, option.ID, heartbeat)
 	go directory.run()
 	return directory, nil
 }
@@ -284,8 +285,9 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 	defer func() { _ = response.Body.Close() }()
 	switch response.StatusCode {
 	case http.StatusNotModified:
-		d.markSent(addr)
+		elapsed := d.markSent(addr)
 		d.resetWarning()
+		d.logHeartbeat(elapsed)
 	case http.StatusOK:
 		var payload struct {
 			Addr string `json:"addr"`
@@ -300,9 +302,11 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 		d.addr = payload.Addr
 		d.etag = response.Header.Get("etag")
 		d.mu.Unlock()
-		d.markSent(addr)
+		elapsed := d.markSent(addr)
 		if previous != payload.Addr {
 			log.Infoln("[PeerDirectory](%s) %s is at %s:%d", d.Name(), d.option.ID, payload.Addr, d.option.Port)
+		} else {
+			d.logHeartbeat(elapsed)
 		}
 		d.resetWarning()
 	default:
@@ -310,12 +314,32 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 	}
 }
 
-func (d *PeerDirectory) markSent(addr string) {
+// logHeartbeat says that a report went out and nothing changed: at debug level
+// this is the line that shows a node is alive, as opposed to quiet.
+func (d *PeerDirectory) logHeartbeat(elapsed time.Duration) {
 	d.mu.Lock()
+	addr := d.addr
+	d.mu.Unlock()
+	if addr == "" {
+		addr = "(no address yet)"
+	}
+	log.Debugln("[PeerDirectory](%s) heartbeat %s: still at %s:%d, %s since the last one",
+		d.Name(), d.option.ID, addr, d.option.Port, elapsed.Round(time.Second))
+}
+
+// markSent records what went out and answers how long the previous report ago
+// went out, which is the number a heartbeat log wants to show.
+func (d *PeerDirectory) markSent(addr string) time.Duration {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	elapsed := time.Duration(0)
+	if !d.sentAt.IsZero() {
+		elapsed = time.Since(d.sentAt)
+	}
 	d.sentAddr = addr
 	d.sentPort = d.option.Port
 	d.sentAt = time.Now()
-	d.mu.Unlock()
+	return elapsed
 }
 
 // pickReportAddress chooses the address this node publishes: a peer has to dial
