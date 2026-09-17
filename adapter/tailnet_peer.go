@@ -35,10 +35,13 @@ type TailnetPeerOption struct {
 	// with DirectoryID naming this node in it. A build that predates these
 	// fields simply ignores them, so a shared profile can carry them before
 	// every device is updated.
-	DirectoryURL   string         `proxy:"directory-url,omitempty"`
-	DirectoryToken string         `proxy:"directory-token,omitempty"`
-	DirectoryID    string         `proxy:"directory-id,omitempty"`
-	Proxy          map[string]any `proxy:"proxy"`
+	DirectoryURL   string `proxy:"directory-url,omitempty"`
+	DirectoryToken string `proxy:"directory-token,omitempty"`
+	DirectoryID    string `proxy:"directory-id,omitempty"`
+	// DirectoryPeer is the name to ask the directory for; it defaults to [Peer],
+	// which may be a tailscale address the directory does not know.
+	DirectoryPeer string         `proxy:"directory-peer,omitempty"`
+	Proxy         map[string]any `proxy:"proxy"`
 }
 
 type TailnetPeer struct {
@@ -208,6 +211,14 @@ func (t *TailnetPeer) proxyForDial(ctx context.Context) (C.Proxy, error) {
 	return inner, nil
 }
 
+// directoryNameKey is the name this outbound asks the directory for.
+func (t *TailnetPeer) directoryNameKey() string {
+	if t.option.DirectoryPeer != "" {
+		return t.option.DirectoryPeer
+	}
+	return t.option.Peer
+}
+
 func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err error) {
 	t.mu.Lock()
 	if (t.cachedHost != "" || t.cachedSelf) && time.Since(t.resolvedAt) < tailnetPeerResolveTTL {
@@ -218,7 +229,7 @@ func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err 
 	t.mu.Unlock()
 
 	if t.directory != nil {
-		addr, _, self, err := t.directory.PeerAddress(ctx, t.option.Peer)
+		addr, _, self, err := t.directory.PeerAddress(ctx, t.directoryNameKey())
 		if err != nil {
 			return "", false, fmt.Errorf("tailnet-peer: %w", err)
 		}
@@ -231,7 +242,7 @@ func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err 
 	}
 
 	if t.option.Directory != "" {
-		addr, _, self, err := tailnet.LookupDirectoryPeer(ctx, t.option.Directory, t.option.Peer)
+		addr, _, self, err := tailnet.LookupDirectoryPeer(ctx, t.option.Directory, t.directoryNameKey())
 		if err != nil {
 			return "", false, fmt.Errorf("tailnet-peer: %w", err)
 		}
