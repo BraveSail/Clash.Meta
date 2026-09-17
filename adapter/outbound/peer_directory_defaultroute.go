@@ -18,6 +18,14 @@ import (
 // way of seeing past its own tunnel.
 var errNoUnderlyingInterface = errors.New("no platform-specific underlying interface detection")
 
+// The strategy seams exist so the decision order can be tested without a tun,
+// a sandbox or a second SIM: production points them at the real detectors.
+var (
+	platformDefaultInterface    = defaultRouteInterfaceViaPlatform
+	underlyingInterfaceName     = underlyingDefaultInterface
+	socketProbeDefaultInterface = defaultRouteInterfaceViaSocket
+)
+
 // The tailscale fork learned the interface that carries traffic the hard way
 // (netmon: detect the underlying default interface, reject virtual adapters,
 // log the decision through the caller's logger). A directory that publishes a
@@ -133,16 +141,16 @@ func (d *PeerDirectory) chooseReportAddress(candidates map[string][]netip.Addr) 
 		how string
 		ask func() string
 	}{
-		{"platform", defaultRouteInterfaceViaPlatform},
+		{"platform", platformDefaultInterface},
 		{"", func() string {
-			name, how, err := underlyingDefaultInterface()
+			name, how, err := underlyingInterfaceName()
 			if err != nil || name == "" {
 				return ""
 			}
 			return how + "\x00" + name
 		}},
 		{"socket-probe", func() string {
-			name, err := defaultRouteInterfaceViaSocket()
+			name, err := socketProbeDefaultInterface()
 			if err != nil {
 				return ""
 			}
