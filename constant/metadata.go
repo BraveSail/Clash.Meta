@@ -18,6 +18,9 @@ const (
 const (
 	TCP NetWork = iota
 	UDP
+	// ICMP is a connection the proxy chain can carry: the TUN hands each echo to
+	// the outbound its rules select, and the outbound answers with the reply.
+	ICMP
 	ALLNet
 	InvalidNet = 0xff
 )
@@ -69,6 +72,8 @@ func (n NetWork) String() string {
 		return "tcp"
 	case UDP:
 		return "udp"
+	case ICMP:
+		return "icmp"
 	case ALLNet:
 		return "all"
 	default:

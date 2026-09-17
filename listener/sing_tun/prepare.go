@@ -18,6 +18,13 @@ import (
 func (h *ListenerHandler) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
 	switch network {
 	case N.NetworkICMP: // our fork only send those type to PrepareConnection now
+		// An echo is a connection like any other: if the rules pick an outbound
+		// that can carry it, hand the packet over instead of answering it here.
+		if !h.DisableICMPForwarding {
+			if proxied := h.prepareICMPProxy(context.Background(), source, destination, routeContext, timeout); proxied != nil {
+				return proxied, nil
+			}
+		}
 		if h.DisableICMPForwarding || h.skipPingForwardingByAddr(destination.Addr) { // skip if ICMP handling is disabled or other condition
 			log.Infoln("[ICMP] %s %s --> %s using fake ping echo", network, source, destination)
 			return nil, nil

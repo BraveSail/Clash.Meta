@@ -633,6 +633,18 @@ func logMetadataErr(metadata *C.Metadata, rule C.Rule, proxy C.ProxyAdapter, err
 	}
 }
 
+// MatchProxy answers which outbound a flow would use, for a caller that brings
+// its own transport. The TUN handler's ICMP path is the caller: it hands each
+// echo to the adapter this returns, so ICMP follows the same rules as TCP and
+// UDP instead of being answered by a raw socket or a fake reply.
+//
+// The helper is empty on purpose: matching runs without the connection
+// metadata a socket would carry, which is what the fake-ip skipper does too.
+func MatchProxy(metadata *C.Metadata) (C.Proxy, error) {
+	proxy, _, err := match(metadata, C.RuleMatchHelper{})
+	return proxy, err
+}
+
 func logMetadata(metadata *C.Metadata, rule C.Rule, remoteConn C.Connection) {
 	switch {
 	case metadata.SpecialProxy != "":

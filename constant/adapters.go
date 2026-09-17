@@ -157,6 +157,19 @@ type DelayHistory struct {
 	Delay uint16    `json:"delay"`
 }
 
+// ICMPProxy is implemented by an adapter that can move an ICMP echo to the
+// destination the rules selected. The L3 tunnels write the packet into their
+// own device; a protocol with an ICMP extension (VLESS, in this fork) asks the
+// peer to put the echo on the wire and streams the reply back. An adapter that
+// does not implement this leaves ICMP to the handler's DIRECT or fake-echo
+// paths, which is what every outbound did before.
+//
+// The messages are ICMP messages without an IP header: the carrier owns the
+// header, because only it knows which stack will finally answer.
+type ICMPProxy interface {
+	ExchangeICMP(ctx context.Context, metadata *Metadata, request []byte) ([]byte, error)
+}
+
 type ProxyState struct {
 	Alive   bool           `json:"alive"`
 	History []DelayHistory `json:"history"`
