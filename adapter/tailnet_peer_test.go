@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,18 @@ import (
 	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
 )
+
+func TestDirectoryIDPrefersTheDeviceSettingOverThePlatformMap(t *testing.T) {
+	platform := map[string]string{"windows": "pc", "android": "gt7", "linux": "linux-box"}
+	option := TailnetPeerOption{DirectoryIDByPlatform: platform}
+	if got := option.directoryID(); got != platform[runtime.GOOS] {
+		t.Fatalf("directoryID() = %q, want this platform's name", got)
+	}
+	option.DirectoryID = "explicit"
+	if got := option.directoryID(); got != "explicit" {
+		t.Fatalf("directoryID() = %q, want the explicit override", got)
+	}
+}
 
 type stubTailnetProvider struct {
 	status tailnet.Status

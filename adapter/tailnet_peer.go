@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,10 +39,24 @@ type TailnetPeerOption struct {
 	DirectoryURL   string `proxy:"directory-url,omitempty"`
 	DirectoryToken string `proxy:"directory-token,omitempty"`
 	DirectoryID    string `proxy:"directory-id,omitempty"`
+	// DirectoryIDByPlatform names this node per platform (the runtime.GOOS
+	// names: windows, android, linux, darwin), so a shared profile can tell each
+	// device who it is without any per-device setting. DirectoryID, which the app
+	// fills from its own setting, wins when both are present.
+	DirectoryIDByPlatform map[string]string `proxy:"directory-id-by-platform,omitempty"`
 	// DirectoryPeer is the name to ask the directory for; it defaults to [Peer],
 	// which may be a tailscale address the directory does not know.
 	DirectoryPeer string         `proxy:"directory-peer,omitempty"`
 	Proxy         map[string]any `proxy:"proxy"`
+}
+
+// directoryID is the name this node reports under: the app's own setting when it
+// is present, otherwise the profile's per-platform entry.
+func (o TailnetPeerOption) directoryID() string {
+	if o.DirectoryID != "" {
+		return o.DirectoryID
+	}
+	return o.DirectoryIDByPlatform[runtime.GOOS]
 }
 
 type TailnetPeer struct {
@@ -83,7 +98,7 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 		direct: NewProxy(outbound.NewDirect()),
 	}
 	if option.DirectoryURL != "" {
-		if option.DirectoryID == "" {
+		if option.directoryID() == "" {
 			// The profile asks for the directory but this device was never told
 			// which node it is: say so instead of quietly resolving somewhere
 			// else.
@@ -93,7 +108,7 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 				Name:  option.Name + " directory",
 				URL:   option.DirectoryURL,
 				Token: option.DirectoryToken,
-				ID:    option.DirectoryID,
+				ID:    option.directoryID(),
 				Port:  option.Port,
 			})
 			if err != nil {
