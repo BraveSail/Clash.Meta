@@ -62,6 +62,10 @@ type Tailscale struct {
 	unregisterHostForward []func()
 	unregisterDNSResolver func()
 	magicDNSDirect        *tailscaleMagicDNSDirectResolver
+
+	// underlayInterface is the interface a protected socket last resolved to;
+	// only Android maintains it.
+	underlayInterface string
 }
 
 type TailscaleOption struct {
@@ -743,6 +747,18 @@ func (t *Tailscale) TailnetStatus(ctx context.Context) (tailnet.Status, error) {
 	result := tailscaleStatusFromIPN(t.Name(), status)
 	fillPeerEndpoints(ctx, lc, &result)
 	return result, nil
+}
+
+// InjectNetworkChange lets the host report a network change it observed: the
+// monitor re-reads the interfaces and announces a link change now, and the
+// underlay probe refreshes its idea of the carrying interface in the same
+// breath instead of on the next tick.
+func (t *Tailscale) InjectNetworkChange() {
+	if t.server == nil {
+		return
+	}
+	t.refreshUnderlayInterface()
+	t.server.InjectNetMonEvent()
 }
 
 type peerNodeLookup interface {

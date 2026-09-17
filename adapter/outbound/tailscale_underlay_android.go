@@ -92,34 +92,37 @@ func (t *Tailscale) probeUnderlayInterface() string {
 // starts, so a first phase retries every few seconds until the first
 // success; the steady phase then refreshes every 30s to follow SIM switches.
 // It runs until the outbound is closed (t.cancel cancels t.ctx).
-func (t *Tailscale) watchUnderlayInterface() {
-	var last string
-	apply := func(why string) bool {
-		name := t.probeUnderlayInterface()
-		if name == "" {
-			return false
-		}
-		if name != last {
-			log.Infoln("[Tailscale](%s) underlay interface: %s (%s); updating netmon default route", t.Name(), name, why)
-			last = name
-		}
-		netmon.UpdateLastKnownDefaultRouteInterface(name)
-		// Ask the network monitor for an immediate link-change event so
-		// magicsock recomputes endpoint candidates now instead of on its
-		// next periodic pass; without this a SIM switch could take minutes
-		// to surface in the endpoint set.
-		if t.server != nil {
-			t.server.InjectNetMonEvent()
-		}
-		return true
+// refreshUnderlayInterface re-probes the protected channel once and hands the
+// result to netmon. watchUnderlayInterface calls it on its cadence, and a
+// network change reported by the host calls it immediately.
+func (t *Tailscale) refreshUnderlayInterface() bool {
+	name := t.probeUnderlayInterface()
+	if name == "" {
+		return false
 	}
+	if name != t.underlayInterface {
+		log.Infoln("[Tailscale](%s) underlay interface: %s; updating netmon default route", t.Name(), name)
+		t.underlayInterface = name
+	}
+	netmon.UpdateLastKnownDefaultRouteInterface(name)
+	// Ask the network monitor for an immediate link-change event so magicsock
+	// recomputes endpoint candidates now instead of on its next periodic pass;
+	// without this a SIM switch could take minutes to surface in the endpoint
+	// set.
+	if t.server != nil {
+		t.server.InjectNetMonEvent()
+	}
+	return true
+}
+
+func (t *Tailscale) watchUnderlayInterface() {
 
 	// Phase 1: dense retries covering the VPN bring-up window. Until the
 	// VPN service installs its protect hook this probe fails immediately
 	// (errTunNotReady), so a few seconds between attempts is enough to
 	// land within one interval of the channel becoming usable.
 	for i := 0; i < 40; i++ {
-		if apply("startup") {
+		if t.refreshUnderlayInterface() {
 			if i > 0 {
 				log.Infoln("[Tailscale](%s) underlay probe: succeeded after %d retries", t.Name(), i)
 			}
@@ -140,7 +143,7 @@ func (t *Tailscale) watchUnderlayInterface() {
 		case <-t.ctx.Done():
 			return
 		case <-ticker.C:
-			apply("periodic")
+			t.refreshUnderlayInterface()
 		}
 	}
 }

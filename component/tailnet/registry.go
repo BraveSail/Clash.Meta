@@ -57,6 +57,23 @@ func RegisteredProviderCount() int {
 	return len(statusProviders)
 }
 
+// NetworkChangeInjector is implemented by outbounds that can act on a network
+// change the host observed instead of waiting for their own polling.
+type NetworkChangeInjector interface {
+	InjectNetworkChange()
+}
+
+// InjectNetworkChange tells every registered outbound that the host saw the
+// network change - an interface switch, a reconnected VPN, a connectivity
+// callback - so endpoints are recomputed now rather than on the next pass.
+func InjectNetworkChange() {
+	for _, provider := range statusProviderSnapshot() {
+		if injector, ok := provider.(NetworkChangeInjector); ok {
+			injector.InjectNetworkChange()
+		}
+	}
+}
+
 func statusProviderSnapshot() []StatusProvider {
 	registryMu.Lock()
 	defer registryMu.Unlock()
