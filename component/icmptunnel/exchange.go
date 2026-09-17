@@ -14,7 +14,6 @@ const messageHeaderLength = 8
 
 var (
 	ErrNotEchoRequest = errors.New("icmp tunnel: not an echo request")
-	ErrNoAnswer       = errors.New("icmp tunnel: no answer")
 	// ErrLocalPath says the outbound the rules picked cannot carry this echo
 	// because it is this very node: a real echo from here would enter this
 	// node's own rules again, so the flow has to keep the direct path it would
