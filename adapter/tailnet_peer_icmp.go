@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,21 @@ import (
 )
 
 var ipv4Loopback = netip.MustParseAddr("127.0.0.1")
+
+// tailnetEchoIdle is how long a session may sit unused before it is closed: a
+// ping in progress keeps it warm, a finished one lets it go.
+const tailnetEchoIdle = 30 * time.Second
+
+// tailnetEchoSession is the tunnel session carried echoes share. Opening one
+// costs a connection to the peer, which is worth paying once for a burst of
+// pings rather than once for every echo - the difference between a round trip
+// and a handshake plus a round trip, on the path where it is most visible.
+type tailnetEchoSession struct {
+	conn  C.PacketConn
+	inner C.Proxy
+	key   string
+	at    time.Time
+}
 
 // ExchangeICMP carries one echo to the peer and brings the reply back.
 //
@@ -63,18 +79,15 @@ func (t *TailnetPeer) ExchangeICMP(ctx context.Context, metadata *C.Metadata, re
 	if port <= 0 {
 		port = t.option.Port + 1
 	}
+	t.echoMu.Lock()
+	defer t.echoMu.Unlock()
 	// The responder lives on the peer's loopback, so the only way in is the
 	// peer's own rule engine - that is, a tunnel this node opened. Nothing of
 	// the responder is reachable from the internet.
-	packetConn, err := proxy.ListenPacketContext(ctx, &C.Metadata{
-		NetWork: C.UDP,
-		DstIP:   ipv4Loopback,
-		DstPort: uint16(port),
-	})
+	packetConn, err := t.echoConnection(ctx, proxy, host, port)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = packetConn.Close() }()
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = packetConn.SetDeadline(deadline)
 	} else {
@@ -82,19 +95,87 @@ func (t *TailnetPeer) ExchangeICMP(ctx context.Context, metadata *C.Metadata, re
 	}
 	destination := &net.UDPAddr{IP: net.IP(ipv4Loopback.AsSlice()), Port: port}
 	if _, err := packetConn.WriteTo(envelope, destination); err != nil {
+		t.dropEcho(packetConn)
 		return nil, err
 	}
-	buffer := make([]byte, 2048)
-	length, _, err := packetConn.ReadFrom(buffer)
-	if err != nil {
-		return nil, err
-	}
-	_, reply, err := icmptunnel.Decode(buffer[:length])
+	reply, err := t.readEcho(packetConn, target, request)
 	if err != nil {
 		return nil, err
 	}
 	log.Debugln("[ICMP] %s %s answered by %s", t.Name(), metadata.RemoteAddress(), target)
 	return reply, nil
+}
+
+// echoConnection answers with the session this peer's echoes share, opening one
+// when there is none, it belongs to another tunnel, or it has been idle.
+func (t *TailnetPeer) echoConnection(ctx context.Context, proxy C.Proxy, host string, port int) (C.PacketConn, error) {
+	key := host + ":" + strconv.Itoa(port)
+	t.mu.Lock()
+	session := t.echo
+	if session != nil && session.inner == proxy && session.key == key && time.Since(session.at) < tailnetEchoIdle {
+		session.at = time.Now()
+		t.mu.Unlock()
+		return session.conn, nil
+	}
+	t.mu.Unlock()
+	if session != nil {
+		t.dropEcho(session.conn)
+	}
+	conn, err := proxy.ListenPacketContext(ctx, &C.Metadata{
+		NetWork: C.UDP,
+		DstIP:   ipv4Loopback,
+		DstPort: uint16(port),
+	})
+	if err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	t.echo = &tailnetEchoSession{conn: conn, inner: proxy, key: key, at: time.Now()}
+	t.mu.Unlock()
+	return conn, nil
+}
+
+// readEcho waits for the answer to this echo. The session may still hold a late
+// answer to an echo that timed out, and each envelope names the address it was
+// made for, so anything that is not this echo is skipped rather than handed to
+// the caller.
+func (t *TailnetPeer) readEcho(conn C.PacketConn, target netip.Addr, request []byte) ([]byte, error) {
+	buffer := make([]byte, 2048)
+	for {
+		length, _, err := conn.ReadFrom(buffer)
+		if err != nil {
+			t.dropEcho(conn)
+			return nil, err
+		}
+		answered, reply, err := icmptunnel.Decode(buffer[:length])
+		if err != nil {
+			continue
+		}
+		if answered != target || !sameEcho(request, reply) {
+			continue
+		}
+		return reply, nil
+	}
+}
+
+// sameEcho reports whether a message carries the identifier and sequence of the
+// request it answers, which is how the tool that sent it matches the two.
+func sameEcho(request, reply []byte) bool {
+	if len(request) < 8 || len(reply) < 8 {
+		return true
+	}
+	return request[4] == reply[4] && request[5] == reply[5] &&
+		request[6] == reply[6] && request[7] == reply[7]
+}
+
+// dropEcho lets go of a session that failed: the next echo opens a new one.
+func (t *TailnetPeer) dropEcho(conn C.PacketConn) {
+	t.mu.Lock()
+	if t.echo != nil && t.echo.conn == conn {
+		t.echo = nil
+	}
+	t.mu.Unlock()
+	_ = conn.Close()
 }
 
 // echoTarget is the address the peer has to put the echo on the wire for: the

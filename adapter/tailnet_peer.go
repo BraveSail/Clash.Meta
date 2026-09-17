@@ -78,6 +78,11 @@ type TailnetPeer struct {
 	cachedHost string
 	cachedSelf bool
 	resolvedAt time.Time
+
+	// echoMu keeps one carried echo in flight per session, and echo is the
+	// tunnel session carried echoes share.
+	echoMu sync.Mutex
+	echo   *tailnetEchoSession
 }
 
 func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
@@ -325,6 +330,15 @@ func (t *TailnetPeer) Close() error {
 		releaseDirectoryClient(t.directory)
 		t.directory = nil
 	}
+	t.echoMu.Lock()
+	t.mu.Lock()
+	session := t.echo
+	t.echo = nil
+	t.mu.Unlock()
+	if session != nil {
+		_ = session.conn.Close()
+	}
+	t.echoMu.Unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.inner != nil {

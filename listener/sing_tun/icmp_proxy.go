@@ -36,8 +36,10 @@ type icmpProxyDestination struct {
 	destination M.Socksaddr
 	timeout     time.Duration
 
-	mu     sync.Mutex
-	closed bool
+	mu       sync.Mutex
+	closed   bool
+	directMu sync.Mutex
+	direct   tun.DirectRouteDestination
 }
 
 func newICMPProxyDestination(
@@ -154,12 +156,18 @@ func (d *icmpProxyDestination) exchange(request []byte, builder replyBuilder, ra
 			// The outbound is this node: the echo has to take the direct path,
 			// which is built here because only this side holds the route
 			// context that keeps it from entering the rules again.
-			d.writeViaDirect(ctx, raw, ipv6)
+			d.writeViaDirect(ctx, request, builder, raw, ipv6)
 			return
 		}
 		log.Debugln("[ICMP] %s %s: %s", d.metadata.SourceDetail(), d.metadata.RemoteAddress(), err)
 		return
 	}
+	d.writeAnswer(builder, reply)
+}
+
+// writeAnswer hands the message an outbound returned to the packet builder and
+// writes the packet into the tunnel.
+func (d *icmpProxyDestination) writeAnswer(builder replyBuilder, reply []byte) {
 	packet, err := builder(reply)
 	if err != nil {
 		log.Warnln("[ICMP] %s answer is unusable: %s", d.metadata.RemoteAddress(), err)
@@ -171,33 +179,60 @@ func (d *icmpProxyDestination) exchange(request []byte, builder replyBuilder, ra
 }
 
 // writeViaDirect sends the echo down the path sing-tun uses when no outbound
-// carries ICMP. A destination that is only a placeholder is resolved first, so
-// a ping to a name still reaches the name instead of the placeholder.
-func (d *icmpProxyDestination) writeViaDirect(ctx context.Context, raw []byte, ipv6 bool) {
+// carries ICMP - unless the destination is only a placeholder, in which case
+// the answer has to be made here: the tool pinged the placeholder, and a reply
+// that arrives from the name it stands for is not a reply it asked for.
+func (d *icmpProxyDestination) writeViaDirect(ctx context.Context, request []byte, builder replyBuilder, raw []byte, ipv6 bool) {
 	destination := d.destination
 	if resolver.IsFakeIP(destination.Addr) && d.metadata.Host != "" {
-		var resolved netip.Addr
-		var err error
-		if ipv6 {
-			resolved, err = resolver.ResolveIPv6(ctx, d.metadata.Host)
-		} else {
-			resolved, err = resolver.ResolveIPv4(ctx, d.metadata.Host)
-		}
+		resolved, err := resolveForEcho(ctx, d.metadata.Host, ipv6)
 		if err != nil {
 			log.Debugln("[ICMP] %s: %s", d.metadata.RemoteAddress(), err)
 			return
 		}
-		destination.Addr = resolved
+		log.Debugln("[ICMP] %s --> %s using DIRECT", d.metadata.RemoteAddress(), resolved)
+		reply, err := icmptunnel.Exchange(ctx, resolved, request, d.timeout)
+		if err != nil {
+			log.Debugln("[ICMP] %s: %s", resolved, err)
+			return
+		}
+		d.writeAnswer(builder, reply)
+		return
 	}
-	direct, err := directICMPDestination(destination, d.back, d.timeout)
+	direct, err := d.directDestination(destination)
 	if err != nil {
 		log.Warnln("[ICMP] %s DIRECT: %s", d.metadata.RemoteAddress(), err)
 		return
 	}
-	log.Debugln("[ICMP] %s %s DIRECT", d.metadata.RemoteAddress(), destination)
+	log.Debugln("[ICMP] %s --> %s using DIRECT", d.metadata.RemoteAddress(), destination)
 	if err := direct.WritePacket(buf.As(raw).ToOwned()); err != nil {
 		log.Debugln("[ICMP] %s DIRECT: %s", d.metadata.RemoteAddress(), err)
 	}
+}
+
+// directDestination keeps the DIRECT socket for as long as this flow lives: it
+// holds the requests it sent and the source the answers come back to, so a
+// fresh one per echo would also mean a fresh answer table per echo.
+func (d *icmpProxyDestination) directDestination(destination M.Socksaddr) (tun.DirectRouteDestination, error) {
+	d.directMu.Lock()
+	defer d.directMu.Unlock()
+	if d.direct != nil && !d.direct.IsClosed() {
+		return d.direct, nil
+	}
+	direct, err := directICMPDestination(destination, d.back, d.timeout)
+	if err != nil {
+		return nil, err
+	}
+	d.direct = direct
+	return direct, nil
+}
+
+// resolveForEcho answers with an address the given family can reach.
+func resolveForEcho(ctx context.Context, host string, ipv6 bool) (netip.Addr, error) {
+	if ipv6 {
+		return resolver.ResolveIPv6(ctx, host)
+	}
+	return resolver.ResolveIPv4(ctx, host)
 }
 
 // ipVersion reads the family the packet was written for.
@@ -213,6 +248,13 @@ func (d *icmpProxyDestination) Close() error {
 	alreadyClosed := d.closed
 	d.closed = true
 	d.mu.Unlock()
+	d.directMu.Lock()
+	direct := d.direct
+	d.direct = nil
+	d.directMu.Unlock()
+	if direct != nil {
+		_ = direct.Close()
+	}
 	if !alreadyClosed {
 		d.cancel()
 	}

@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"encoding/binary"
 	"net/netip"
 	"testing"
 
@@ -101,6 +102,30 @@ func echoRequest(kind byte) []byte {
 	request := make([]byte, 8)
 	request[0] = kind
 	return request
+}
+
+// A session carries one echo at a time, and the answer to an echo that already
+// timed out can still arrive: the identifier and sequence are what tells the
+// two apart, so an answer for another echo is never handed to this one.
+func TestSameEchoComparesIdentifierAndSequence(t *testing.T) {
+	request := make([]byte, 8)
+	binary.BigEndian.PutUint16(request[4:6], 0x1234)
+	binary.BigEndian.PutUint16(request[6:8], 7)
+
+	answer := append([]byte(nil), request...)
+	answer[0] = 0
+	if !sameEcho(request, answer) {
+		t.Fatal("the answer to this echo was refused")
+	}
+	answer[4]++
+	if sameEcho(request, answer) {
+		t.Fatal("an answer for another identifier was accepted")
+	}
+	answer[4]--
+	answer[7]++
+	if sameEcho(request, answer) {
+		t.Fatal("an answer for another sequence was accepted")
+	}
 }
 
 type placeholderMapper struct {
