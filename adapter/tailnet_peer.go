@@ -84,9 +84,10 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 	}
 	if option.DirectoryURL != "" {
 		if option.DirectoryID == "" {
-			// No name of our own yet: keep resolving through tailscale until the
-			// device is told which node it is.
-			log.Debugln("tailnet-peer: %s configures a directory but no id; staying on the tailscale path", option.Name)
+			// The profile asks for the directory but this device was never told
+			// which node it is: say so instead of quietly resolving somewhere
+			// else.
+			log.Warnln("tailnet-peer: %s configures a directory but this device has no name for it", option.Name)
 		} else {
 			directory, err := acquireDirectoryClient(outbound.PeerDirectoryOption{
 				Name:  option.Name + " directory",
@@ -239,6 +240,13 @@ func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err 
 		}
 		t.storeResolved(addr, false)
 		return addr, false, nil
+	}
+
+	if t.option.DirectoryURL != "" {
+		return "", false, fmt.Errorf(
+			"tailnet-peer: %s is configured for the peer directory but this device has no directory name; set one in the app",
+			t.option.Name,
+		)
 	}
 
 	if t.option.Directory != "" {
