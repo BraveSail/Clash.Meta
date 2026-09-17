@@ -241,6 +241,7 @@ func (d *PeerDirectory) run() {
 func (d *PeerDirectory) maybeReport(force bool) {
 	addr := pickReportAddress(localAddressesByInterface())
 	d.mu.Lock()
+	previous := d.sentAddr
 	unchanged := !force &&
 		addr == d.sentAddr &&
 		d.option.Port == d.sentPort &&
@@ -249,6 +250,16 @@ func (d *PeerDirectory) maybeReport(force bool) {
 	d.mu.Unlock()
 	if unchanged {
 		return
+	}
+	// A device that moved to a network without a global IPv6 has nothing to
+	// publish; saying so is the difference between "the directory is stale" and
+	// "this network cannot be dialled", which is otherwise invisible.
+	switch {
+	case addr == "" && previous != "":
+		log.Warnln("[PeerDirectory](%s) %s has no global IPv6 on this network; the directory keeps the address it already has",
+			d.Name(), d.option.ID)
+	case addr != "" && previous == "":
+		log.Infoln("[PeerDirectory](%s) %s publishes %s again", d.Name(), d.option.ID, addr)
 	}
 	d.report(d.ctx, addr)
 }
