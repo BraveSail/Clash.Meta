@@ -2,8 +2,12 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -224,5 +228,79 @@ func TestTailnetPeerDialsLocalServiceForItself(t *testing.T) {
 	}
 	if got := string(buf[:n]); got != "local" {
 		t.Fatalf("read %q, want the local service", got)
+	}
+}
+
+type stubDirectoryServer struct {
+	reports atomic.Int64
+	ownID   string
+	peerID  string
+	peer    string
+}
+
+func newStubDirectoryServer(t *testing.T, ownID, peerID, peerAddr string) (*stubDirectoryServer, *httptest.Server) {
+	t.Helper()
+	stub := &stubDirectoryServer{ownID: ownID, peerID: peerID, peer: peerAddr}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/report":
+			stub.reports.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"id":      stub.ownID,
+				"addr":    "2409:8a55::1",
+				"port":    8443,
+				"changed": true,
+			})
+		case "/lookup":
+			if request.URL.Query().Get("id") != stub.peerID {
+				writer.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"nodes": map[string]any{
+					stub.peerID: map[string]any{"addr": stub.peer, "port": 8443},
+				},
+			})
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return stub, server
+}
+
+// A peer may carry the directory inline, which lets a shared profile list the
+// directory before every device runs a build that knows the fields.
+func TestTailnetPeerResolvesThroughAnInlineDirectory(t *testing.T) {
+	stub, server := newStubDirectoryServer(t, "pc", "gt7", "2409:895a::1")
+
+	create := func(peer string) *TailnetPeer {
+		created, err := NewTailnetPeer(TailnetPeerOption{
+			Name:           peer,
+			Peer:           peer,
+			Port:           8443,
+			Proxy:          map[string]any{"type": "direct", "name": "inner"},
+			DirectoryURL:   server.URL,
+			DirectoryToken: "secret",
+			DirectoryID:    "pc",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = created.Close() })
+		return created
+	}
+
+	host, self, err := create("gt7").resolve(context.Background())
+	if err != nil || self || host != "2409:895a::1" {
+		t.Fatalf("resolve = %q self=%v err=%v", host, self, err)
+	}
+	host, self, err = create("pc").resolve(context.Background())
+	if err != nil || !self || host != "" {
+		t.Fatalf("resolve(self) = %q self=%v err=%v", host, self, err)
+	}
+	// Both peers share one client, so this node reports itself once.
+	if reports := stub.reports.Load(); reports != 1 {
+		t.Fatalf("reports = %d, want one client per node", reports)
 	}
 }

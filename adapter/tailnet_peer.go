@@ -14,6 +14,7 @@ import (
 	"github.com/metacubex/mihomo/component/iface"
 	"github.com/metacubex/mihomo/component/tailnet"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
 )
 
 // tailnetPeerResolveTTL keeps a burst of connections from re-reading the
@@ -25,11 +26,19 @@ const tailnetPeerResolveTTL = 2 * time.Second
 // are replaced with the peer's current address.
 type TailnetPeerOption struct {
 	outbound.BasicOption
-	Name      string         `proxy:"name"`
-	Peer      string         `proxy:"peer"`
-	Port      int            `proxy:"port"`
-	Proxy     map[string]any `proxy:"proxy"`
-	Directory string         `proxy:"directory,omitempty"`
+	Name string `proxy:"name"`
+	Peer string `proxy:"peer"`
+	Port int    `proxy:"port"`
+	// Directory names another outbound that answers the peer's address.
+	Directory string `proxy:"directory,omitempty"`
+	// DirectoryURL and DirectoryToken configure that directory inline instead,
+	// with DirectoryID naming this node in it. A build that predates these
+	// fields simply ignores them, so a shared profile can carry them before
+	// every device is updated.
+	DirectoryURL   string         `proxy:"directory-url,omitempty"`
+	DirectoryToken string         `proxy:"directory-token,omitempty"`
+	DirectoryID    string         `proxy:"directory-id,omitempty"`
+	Proxy          map[string]any `proxy:"proxy"`
 }
 
 type TailnetPeer struct {
@@ -37,6 +46,9 @@ type TailnetPeer struct {
 
 	option TailnetPeerOption
 	direct C.Proxy
+	// directory is this outbound's handle on the shared directory client, if one
+	// was configured inline.
+	directory *outbound.PeerDirectory
 
 	mu         sync.Mutex
 	inner      C.Proxy
@@ -66,6 +78,25 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 		}),
 		option: option,
 		direct: NewProxy(outbound.NewDirect()),
+	}
+	if option.DirectoryURL != "" {
+		if option.DirectoryID == "" {
+			// No name of our own yet: keep resolving through tailscale until the
+			// device is told which node it is.
+			log.Debugln("tailnet-peer: %s configures a directory but no id; staying on the tailscale path", option.Name)
+		} else {
+			directory, err := acquireDirectoryClient(outbound.PeerDirectoryOption{
+				Name:  option.Name + " directory",
+				URL:   option.DirectoryURL,
+				Token: option.DirectoryToken,
+				ID:    option.DirectoryID,
+				Port:  option.Port,
+			})
+			if err != nil {
+				return nil, err
+			}
+			peer.directory = directory
+		}
 	}
 	inner, err := peer.buildInner("")
 	if err != nil {
@@ -186,6 +217,19 @@ func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err 
 	}
 	t.mu.Unlock()
 
+	if t.directory != nil {
+		addr, _, self, err := t.directory.PeerAddress(ctx, t.option.Peer)
+		if err != nil {
+			return "", false, fmt.Errorf("tailnet-peer: %w", err)
+		}
+		if self {
+			t.storeResolved("", true)
+			return "", true, nil
+		}
+		t.storeResolved(addr, false)
+		return addr, false, nil
+	}
+
 	if t.option.Directory != "" {
 		addr, _, self, err := tailnet.LookupDirectoryPeer(ctx, t.option.Directory, t.option.Peer)
 		if err != nil {
@@ -281,6 +325,10 @@ func (t *TailnetPeer) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 }
 
 func (t *TailnetPeer) Close() error {
+	if t.directory != nil {
+		releaseDirectoryClient(t.directory)
+		t.directory = nil
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.inner != nil {
