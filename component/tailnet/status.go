@@ -27,23 +27,28 @@ type Status struct {
 }
 
 type NodeStatus struct {
-	Name           string     `json:"name"`
-	HostName       string     `json:"hostName,omitempty"`
-	DNSName        string     `json:"dnsName,omitempty"`
-	OS             string     `json:"os,omitempty"`
-	TailscaleIPs   []string   `json:"tailscaleIPs,omitempty"`
-	Online         bool       `json:"online"`
-	Active         bool       `json:"active"`
-	LastSeen       *time.Time `json:"lastSeen,omitempty"`
-	Addrs          []string   `json:"addrs,omitempty"`
-	CurAddr        string     `json:"curAddr,omitempty"`
-	Relay          string     `json:"relay,omitempty"`
-	PeerRelay      string     `json:"peerRelay,omitempty"`
-	ExitNode       bool       `json:"exitNode,omitempty"`
-	ExitNodeOption bool       `json:"exitNodeOption,omitempty"`
-	TxBytes        int64      `json:"txBytes,omitempty"`
-	RxBytes        int64      `json:"rxBytes,omitempty"`
-	Self           bool       `json:"self,omitempty"`
+	Name              string     `json:"name"`
+	HostName          string     `json:"hostName,omitempty"`
+	DNSName           string     `json:"dnsName,omitempty"`
+	OS                string     `json:"os,omitempty"`
+	TailscaleIPs      []string   `json:"tailscaleIPs,omitempty"`
+	Online            bool       `json:"online"`
+	Active            bool       `json:"active"`
+	LastSeen          *time.Time `json:"lastSeen,omitempty"`
+	Addrs             []string   `json:"addrs,omitempty"`
+	CurAddr           string     `json:"curAddr,omitempty"`
+	Relay             string     `json:"relay,omitempty"`
+	PeerRelay         string     `json:"peerRelay,omitempty"`
+	DirectVerified    bool       `json:"directVerified,omitempty"`
+	DerpDataBlocked   bool       `json:"derpDataBlocked,omitempty"`
+	DerpDataDropped   int64      `json:"derpDataDropped,omitempty"`
+	DerpDataDroppedRx int64      `json:"derpDataDroppedRx,omitempty"`
+	DirectDataSent    int64      `json:"directDataSent,omitempty"`
+	ExitNode          bool       `json:"exitNode,omitempty"`
+	ExitNodeOption    bool       `json:"exitNodeOption,omitempty"`
+	TxBytes           int64      `json:"txBytes,omitempty"`
+	RxBytes           int64      `json:"rxBytes,omitempty"`
+	Self              bool       `json:"self,omitempty"`
 }
 
 func (s Status) Text() string {
