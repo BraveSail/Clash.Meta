@@ -19,8 +19,9 @@ import (
 var ipv4Loopback = netip.MustParseAddr("127.0.0.1")
 
 // tailnetEchoIdle is how long a session may sit unused before it is closed: a
-// ping in progress keeps it warm, a finished one lets it go.
-const tailnetEchoIdle = 30 * time.Second
+// ping in progress keeps it warm, and a burst that takes a longer break pays
+// one handshake again rather than holding a connection open forever.
+const tailnetEchoIdle = 2 * time.Minute
 
 // tailnetEchoSession is the tunnel session carried echoes share. Opening one
 // costs a connection to the peer, which is worth paying once for a burst of
@@ -93,17 +94,34 @@ func (t *TailnetPeer) ExchangeICMP(ctx context.Context, metadata *C.Metadata, re
 	} else {
 		_ = packetConn.SetDeadline(time.Now().Add(5 * time.Second))
 	}
-	destination := &net.UDPAddr{IP: net.IP(ipv4Loopback.AsSlice()), Port: port}
-	if _, err := packetConn.WriteTo(envelope, destination); err != nil {
-		t.dropEcho(packetConn)
-		return nil, err
-	}
-	reply, err := t.readEcho(packetConn, target, request)
+	reply, err := t.echoOnce(packetConn, envelope, port, target, request)
 	if err != nil {
-		return nil, err
+		// A session that went stale - the peer restarted, the path moved - is
+		// worth one more try on a fresh one before the echo is called lost.
+		t.dropEcho(packetConn)
+		packetConn, err = t.echoConnection(ctx, proxy, host, port)
+		if err != nil {
+			return nil, err
+		}
+		if deadline, ok := ctx.Deadline(); ok {
+			_ = packetConn.SetDeadline(deadline)
+		}
+		if reply, err = t.echoOnce(packetConn, envelope, port, target, request); err != nil {
+			t.dropEcho(packetConn)
+			return nil, err
+		}
 	}
 	log.Debugln("[ICMP] %s %s answered by %s", t.Name(), metadata.RemoteAddress(), target)
 	return reply, nil
+}
+
+// echoOnce sends one envelope over [conn] and waits for its answer.
+func (t *TailnetPeer) echoOnce(conn C.PacketConn, envelope []byte, port int, target netip.Addr, request []byte) ([]byte, error) {
+	destination := &net.UDPAddr{IP: net.IP(ipv4Loopback.AsSlice()), Port: port}
+	if _, err := conn.WriteTo(envelope, destination); err != nil {
+		return nil, err
+	}
+	return t.readEcho(conn, target, request)
 }
 
 // echoConnection answers with the session this peer's echoes share, opening one
