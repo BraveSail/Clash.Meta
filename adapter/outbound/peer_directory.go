@@ -26,6 +26,11 @@ import (
 	"github.com/metacubex/mihomo/log"
 )
 
+// localAddresses is the interface scan this package reasons about. It is a
+// variable so a test can describe the interfaces it wants the decision to see
+// instead of the ones the machine happens to have.
+var localAddresses = localAddressesByInterface
+
 const (
 	peerDirectoryDefaultPort    = 8443
 	peerDirectoryDefaultRefresh = 30 * time.Second
@@ -260,7 +265,7 @@ func (d *PeerDirectory) run() {
 // time, after the address this node would publish changes, and once every
 // heartbeat so the directory can tell a quiet node from an absent one.
 func (d *PeerDirectory) maybeReport(force bool) {
-	candidates := localAddressesByInterface()
+	candidates := localAddresses()
 	// Which interface carries traffic decides what to publish: an interface
 	// scan alone reports every physical NIC, including the SIM that is idle.
 	addr, ifaceName, how := d.chooseReportAddress(candidates)

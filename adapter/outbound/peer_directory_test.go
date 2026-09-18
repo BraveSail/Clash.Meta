@@ -192,8 +192,16 @@ func TestPeerDirectoryLooksUpPeersAndAnswersForItself(t *testing.T) {
 func TestPeerDirectoryHeartbeatsWhenTheAddressIsUnchanged(t *testing.T) {
 	stub, server := newDirectoryStub(t, "2409:8a55::1")
 	directory := newTestDirectory(t, server.URL)
-	directory.heartbeat = 60 * time.Millisecond
+	// The interval has to outlast the report itself, or the test measures the
+	// machine's speed rather than the heartbeat: a report is an HTTP request.
+	directory.heartbeat = 3 * time.Second
 
+	// A directory reports once on its own when it starts; wait for that report
+	// so this test measures its own calls and not the background one.
+	settle := time.Now().Add(2 * time.Second)
+	for stub.reports.Load() == 0 && time.Now().Before(settle) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	directory.maybeReport(true)
 	first := stub.reports.Load()
 	if first == 0 {
@@ -203,8 +211,14 @@ func TestPeerDirectoryHeartbeatsWhenTheAddressIsUnchanged(t *testing.T) {
 	if reported := stub.reports.Load(); reported != first {
 		t.Fatalf("reports = %d, want no report inside the heartbeat", reported)
 	}
-	time.Sleep(80 * time.Millisecond)
-	directory.maybeReport(false)
+	// The heartbeat is due after its interval; how long the report itself takes
+	// depends on the machine, so the test waits for it rather than for a fixed
+	// moment.
+	deadline := time.Now().Add(12 * time.Second)
+	for stub.reports.Load() != first+1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		directory.maybeReport(false)
+	}
 	if reported := stub.reports.Load(); reported != first+1 {
 		t.Fatalf("reports = %d, want one heartbeat after the interval", reported)
 	}
