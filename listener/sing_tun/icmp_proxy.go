@@ -104,10 +104,12 @@ func (h *ListenerHandler) prepareICMPProxy(
 				log.Debugln("[ICMP] %s sent to %s as it is", destination.Addr, address)
 				return newICMPDirectDestination(parent, routeContext, metadata, destination.Addr, address, timeout)
 			case err == nil:
-				// No address: the carrier moves this echo itself (see ICMPProxy).
-				log.Debugln("[ICMP] %s host=%q matches %s", destination.Addr, metadata.Host, carrierName)
+				// No address: the flow points at this node, so this node answers
+				// it here. Answering it here also keeps the verdict the carrier
+				// just gave: asking it again later could disagree.
+				log.Debugln("[ICMP] %s host=%q is %s itself: answering here", destination.Addr, metadata.Host, carrierName)
 				log.Infoln("[ICMP] %s %s --> %s using %s", metadata.NetWork.String(), source, destination, carrierName)
-				return newICMPProxyDestination(parent, routeContext, carrierOf(adapter), metadata, timeout)
+				return newICMPProxyDestination(parent, routeContext, localAnswerCarrier{}, metadata, timeout)
 			case errors.Is(err, icmptunnel.ErrLocalPath):
 				// The rules picked this node itself: it answers its own flows,
 				// so the echo keeps the path it would have had without a carrier.
@@ -156,6 +158,14 @@ func (unreachableCarrier) ExchangeICMP(context.Context, *C.Metadata, []byte) ([]
 	return nil, icmptunnel.ErrUnreachable
 }
 
+// localAnswerCarrier answers an echo this node is the target of: the message
+// describes a packet this stack would have answered itself.
+type localAnswerCarrier struct{}
+
+func (localAnswerCarrier) ExchangeICMP(_ context.Context, metadata *C.Metadata, request []byte) ([]byte, error) {
+	return icmptunnel.LocalReply(request, metadata.DstIP)
+}
+
 // silentCarrier stands in for "this echo cannot be placed right now": it is
 // dropped, so the tool times out rather than being told a route does not exist.
 type silentCarrier struct{}
@@ -185,12 +195,6 @@ func icmpAdapter(proxy C.Proxy, metadata *C.Metadata) (C.ProxyAdapter, string) {
 		proxy = proxy.Unwrap(metadata, false)
 	}
 	return nil, ""
-}
-
-// carrierOf hands the destination the interface it was asked for.
-func carrierOf(adapter C.ProxyAdapter) C.ICMPProxy {
-	carrier, _ := C.ICMPCarrierOf(adapter)
-	return carrier
 }
 
 func (d *icmpProxyDestination) WritePacket(packet *buf.Buffer) error {
