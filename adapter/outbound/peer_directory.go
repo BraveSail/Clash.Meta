@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface"
 	"github.com/metacubex/mihomo/component/peerdirectory"
 	C "github.com/metacubex/mihomo/constant"
@@ -112,6 +114,20 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 	if heartbeat < peerDirectoryMinimumHeartbeat {
 		heartbeat = peerDirectoryMinimumHeartbeat
 	}
+	// The directory is the one thing this node cannot ask a peer about, so its
+	// requests use mihomo's own dialer: that resolves names for real - the
+	// system resolver hands out this node's fake-ip placeholders - and binds the
+	// socket to the interface carrying traffic, so a request made to find out
+	// where a peer is cannot end up inside this node's own tunnel.
+	transport := &http.Transport{
+		MaxIdleConns:          100,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
+		},
+	}
 	directory := &PeerDirectory{
 		Base: NewBase(BaseOption{
 			Name:         option.Name,
@@ -120,7 +136,7 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 			ProviderName: option.ProviderName,
 		}),
 		option:    option,
-		client:    &http.Client{Timeout: timeout},
+		client:    &http.Client{Timeout: timeout, Transport: transport},
 		ctx:       ctx,
 		cancel:    cancel,
 		heartbeat: heartbeat,
