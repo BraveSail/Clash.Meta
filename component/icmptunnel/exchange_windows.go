@@ -106,7 +106,7 @@ func sendEcho4(handle uintptr, request EchoRequest, timeoutMS uint32) ([]byte, n
 		0,
 		0,
 		uintptr(destination),
-		uintptr(unsafe.Pointer(&payload[0])),
+		payloadPointer(payload),
 		uintptr(uint16(len(payload))),
 		0,
 		uintptr(unsafe.Pointer(&reply[0])),
@@ -138,7 +138,7 @@ func sendEcho6(handle uintptr, request EchoRequest, timeoutMS uint32) ([]byte, n
 		0,
 		uintptr(unsafe.Pointer(&source)),
 		uintptr(unsafe.Pointer(&destination)),
-		uintptr(unsafe.Pointer(&payload[0])),
+		payloadPointer(payload),
 		uintptr(uint16(len(payload))),
 		0,
 		uintptr(unsafe.Pointer(&reply[0])),
@@ -159,6 +159,15 @@ func sendEcho6(handle uintptr, request EchoRequest, timeoutMS uint32) ([]byte, n
 		return nil, netip.Addr{}, errors.New("icmptunnel: short echo reply")
 	}
 	return append([]byte(nil), reply[echoReply6Data:end]...), request.Target, nil
+}
+
+// payloadPointer hands the API the bytes it has to send. An echo may carry
+// nothing, and taking the address of an empty slice would panic.
+func payloadPointer(payload []byte) uintptr {
+	if len(payload) == 0 {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(&payload[0]))
 }
 
 // copyReplyData reads the payload the API pointed at. The pointer names a spot

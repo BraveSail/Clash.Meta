@@ -23,6 +23,36 @@ var ipv4Loopback = netip.MustParseAddr("127.0.0.1")
 // one handshake again rather than holding a connection open forever.
 const tailnetEchoIdle = 2 * time.Minute
 
+// tailnetEchoTimeout bounds one echo the outbound makes itself.
+const tailnetEchoTimeout = 3 * time.Second
+
+// directEcho asks the peer's own stack for the answer: the echo goes to the
+// address the directory publishes for the peer, which is the packet the tool
+// would have sent if the two nodes shared a network. The bytes are the tool's
+// own echo message; nothing is re-typed, re-addressed or wrapped.
+func directEcho(ctx context.Context, peer netip.Addr, request []byte) ([]byte, error) {
+	timeout := tailnetEchoTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return icmptunnel.Exchange(ctx, peer, request, timeout)
+}
+
+// echoSpeaksFor reports whether an echo message belongs to the family of the
+// address it would be sent to: an ICMPv4 message cannot travel over an IPv6
+// path, and re-typing it would be inventing a packet the tool never sent.
+func echoSpeaksFor(peer netip.Addr, request []byte) bool {
+	if !peer.IsValid() || len(request) == 0 {
+		return false
+	}
+	if peer.Is6() {
+		return request[0] == 128
+	}
+	return request[0] == 8
+}
+
 // tailnetEchoSession is the tunnel session carried echoes share. Opening one
 // costs a connection to the peer, which is worth paying once for a burst of
 // pings rather than once for every echo - the difference between a round trip
@@ -34,15 +64,21 @@ type tailnetEchoSession struct {
 	at    time.Time
 }
 
-// ExchangeICMP carries one echo to the peer and brings the reply back.
+// ExchangeICMP answers an echo with the peer, in one of two shapes.
 //
-// ICMP cannot ride the inner protocol (VLESS has no field for it), so the
-// message travels as a UDP datagram through the tunnel to the peer's responder,
-// which puts a real echo on the wire. The target is the peer itself when the
-// flow was aimed at its name - answered on the peer's loopback, which is a real
-// answer from that node - and the address that was dialled otherwise, which is
-// how a node whose carrier only gives it IPv6 can still ping an IPv4 address
-// through a peer that has both.
+// An echo aimed at the peer itself is sent straight to the address the
+// directory publishes for it: the peer's own stack answers, exactly as it would
+// if the two nodes shared a network, and nothing about the packet changes but
+// the family it is asked in. When the peer cannot be reached that way - it
+// blocks inbound ICMP, or the address is not routable from here - the outbound
+// can be configured to carry the echo instead (see TailnetPeerOption.ICMP).
+//
+// An echo aimed anywhere else cannot be answered by this node, because the
+// answer has to come from the peer's network: ICMP cannot ride the inner
+// protocol (VLESS has no field for it), so the message travels as a UDP
+// datagram through the tunnel to the peer's responder, which puts a real echo
+// on the wire. That is how a node whose carrier only gives it IPv6 pings an
+// IPv4 address through a peer that holds both.
 func (t *TailnetPeer) ExchangeICMP(ctx context.Context, metadata *C.Metadata, request []byte) ([]byte, error) {
 	host, self, err := t.resolve(ctx)
 	if err != nil {
@@ -61,8 +97,20 @@ func (t *TailnetPeer) ExchangeICMP(ctx context.Context, metadata *C.Metadata, re
 		log.Debugln("[ICMP] %s %s is this node: using DIRECT", t.Name(), metadata.RemoteAddress())
 		return nil, icmptunnel.ErrLocalPath
 	}
-	if _, err := netip.ParseAddr(host); err != nil {
+	peerAddr, err := netip.ParseAddr(host)
+	if err != nil {
 		return nil, fmt.Errorf("tailnet-peer: peer %q is not an address: %w", host, err)
+	}
+	if t.destinationIsThePeer(metadata) && t.option.icmpDirect() {
+		if echoSpeaksFor(peerAddr, request) {
+			log.Debugln("[ICMP] %s %s sent to %s as it is", t.Name(), metadata.RemoteAddress(), peerAddr)
+			return directEcho(ctx, peerAddr, request)
+		}
+		// The tool asked in the other family - an IPv4 echo for a peer that only
+		// has an IPv6 address. Nothing can be passed through unchanged there, so
+		// the message is carried instead (see the envelope below).
+		log.Debugln("[ICMP] %s %s is %s, the echo is not - carrying it instead",
+			t.Name(), metadata.RemoteAddress(), familyName(peerAddr.Is6()))
 	}
 	target, err := t.echoTarget(ctx, metadata, request)
 	if err != nil {

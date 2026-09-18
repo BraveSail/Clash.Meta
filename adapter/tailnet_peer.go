@@ -50,8 +50,19 @@ type TailnetPeerOption struct {
 	// ICMPPort is where the peer's responder listens for a carried echo. It
 	// defaults to one above the tunnel's own port, so a shared profile needs no
 	// extra setting.
-	ICMPPort int            `proxy:"icmp-port,omitempty"`
-	Proxy    map[string]any `proxy:"proxy"`
+	ICMPPort int `proxy:"icmp-port,omitempty"`
+	// ICMP chooses how an echo aimed at the peer itself travels. "direct" (the
+	// default) sends it to the peer's own address, which is what a node on the
+	// same network would do; "carried" wraps it for the peer's responder, which
+	// is the way in when the peer does not answer ICMP from the outside.
+	ICMP  string         `proxy:"icmp,omitempty"`
+	Proxy map[string]any `proxy:"proxy"`
+}
+
+// icmpDirect reports whether an echo aimed at the peer goes to the peer's own
+// address instead of being carried through the tunnel.
+func (o TailnetPeerOption) icmpDirect() bool {
+	return !strings.EqualFold(strings.TrimSpace(o.ICMP), "carried")
 }
 
 // directoryID is the name this node reports under: the app's own setting when it
