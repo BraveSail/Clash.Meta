@@ -8,24 +8,19 @@ import (
 	"net"
 	"net/netip"
 	"time"
-
-	"golang.org/x/net/icmp"
 )
 
 // sendEcho puts one real echo on the wire and returns the payload and the
 // address that answered.
 //
-// The socket is unprivileged: "udp4"/"udp6" here mean an ICMP datagram socket
-// (the ping socket Linux and Android hand to applications), not a raw socket,
-// so a responder needs no capabilities at all. The kernel owns the identifier
-// on such a socket, which is why only the payload travels back: the caller puts
-// the identifier the originator used into the reply.
+// The socket is unprivileged: a datagram socket whose protocol is ICMP - the
+// ping socket Linux and Android hand to applications - not a raw socket, so an
+// echo needs no capabilities at all, and the kernel owns the identifier on it.
+// It is opened the way the rest of mihomo opens sockets, through the dialer's
+// control hook, because that is what protects it from this node's own tunnel on
+// Android and what binds it to the carrying interface elsewhere.
 func sendEcho(ctx context.Context, request EchoRequest, timeout time.Duration) ([]byte, netip.Addr, error) {
-	network := "udp4"
-	if request.Target.Is6() {
-		network = "udp6"
-	}
-	conn, err := icmp.ListenPacket(network, "")
+	conn, err := listenEchoSocket(request.Target)
 	if err != nil {
 		return nil, netip.Addr{}, err
 	}
@@ -62,8 +57,21 @@ func sendEcho(ctx context.Context, request EchoRequest, timeout time.Duration) (
 		} else if reply[0] != 129 {
 			continue
 		}
-		answered, _ := netip.AddrFromSlice(from.(*net.IPAddr).IP)
-		return append([]byte(nil), reply[messageHeaderLength:]...), answered.Unmap(), nil
+		return append([]byte(nil), reply[messageHeaderLength:]...), echoSource(from), nil
+	}
+}
+
+// echoSource reads the address an echo came from, which either socket flavour
+// reports in its own type.
+func echoSource(from net.Addr) netip.Addr {
+	switch addr := from.(type) {
+	case *net.IPAddr:
+		answered, _ := netip.AddrFromSlice(addr.IP)
+		return answered.Unmap()
+	case *net.UDPAddr:
+		return addr.AddrPort().Addr().Unmap()
+	default:
+		return netip.Addr{}
 	}
 }
 
