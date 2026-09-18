@@ -129,6 +129,54 @@ func TestUnreachableReplyQuotesThePacket(t *testing.T) {
 	}
 }
 
+// A flow that was pinged as a placeholder travels to the address the name
+// stands for, and its answer comes back as the placeholder: both are the same
+// bytes with one address changed, and the checksums that cover that address are
+// recomputed.
+func TestReaddressedPacketsKeepTheirChecksums(t *testing.T) {
+	real := netip.MustParseAddr("123.56.139.83")
+	packet := ipv4Packet(netip.MustParseAddr("7.0.0.0"), netip.MustParseAddr("7.0.0.4"), echoRequest(8, 1, 1, []byte("x")))
+	binary.BigEndian.PutUint16(packet[10:12], checksum(packet[:20]))
+
+	out := readdress(packet, real, false)
+	if got := netip.AddrFrom4([4]byte(out[16:20])); got != real {
+		t.Fatalf("request destination = %s", got)
+	}
+	if sum := checksum(out[:20]); sum != 0 {
+		t.Fatalf("IPv4 header checksum does not verify: %#x", sum)
+	}
+	if got := netip.AddrFrom4([4]byte(packet[16:20])); got == real || got.String() != "7.0.0.4" {
+		t.Fatal("the packet handed in was modified")
+	}
+
+	answer := ipv4Packet(real, netip.MustParseAddr("7.0.0.0"), echoRequest(0, 1, 1, []byte("x")))
+	binary.BigEndian.PutUint16(answer[10:12], checksum(answer[:20]))
+	back := readdress(answer, netip.MustParseAddr("7.0.0.4"), true)
+	if got := netip.AddrFrom4([4]byte(back[12:16])); got.String() != "7.0.0.4" {
+		t.Fatalf("answer source = %s", got)
+	}
+	if sum := checksum(back[:20]); sum != 0 {
+		t.Fatalf("IPv4 header checksum does not verify: %#x", sum)
+	}
+
+	packet6 := ipv6Packet(netip.MustParseAddr("fdfe:dcba:9876::1"), netip.MustParseAddr("2001::fdfe:dcba:9876:4"), echoRequest(128, 2, 2, nil))
+	real6 := netip.MustParseAddr("2400:3200::1")
+	out6 := readdress(packet6, real6, false)
+	if got := netip.AddrFrom16([16]byte(out6[24:40])); got != real6 {
+		t.Fatalf("IPv6 request destination = %s", got)
+	}
+	answer6 := ipv6Packet(real6, netip.MustParseAddr("fdfe:dcba:9876::1"), echoRequest(129, 2, 2, nil))
+	back6 := readdress(answer6, netip.MustParseAddr("2001::fdfe:dcba:9876:4"), true)
+	source := netip.AddrFrom16([16]byte(back6[8:24]))
+	destination := netip.AddrFrom16([16]byte(back6[24:40]))
+	if source.String() != "2001::fdfe:dcba:9876:4" {
+		t.Fatalf("IPv6 answer source = %s", source)
+	}
+	if sum := icmpv6Checksum(source, destination, back6[40:]); sum != 0 {
+		t.Fatalf("ICMPv6 checksum does not verify: %#x", sum)
+	}
+}
+
 // echoRequest builds an ICMP echo message: type, code, checksum, id, sequence.
 func echoRequest(kind byte, id uint16, sequence uint16, payload []byte) []byte {
 	message := make([]byte, 8+len(payload))

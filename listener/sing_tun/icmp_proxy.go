@@ -27,19 +27,15 @@ import (
 // tool that sent the ping matches the answer, and the checksums are recomputed
 // for the packet this side finally writes.
 type icmpProxyDestination struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	back        tun.DirectRouteContext
-	proxy       C.ICMPProxy
-	metadata    *C.Metadata
-	source      M.Socksaddr
-	destination M.Socksaddr
-	timeout     time.Duration
+	ctx      context.Context
+	cancel   context.CancelFunc
+	back     tun.DirectRouteContext
+	proxy    C.ICMPProxy
+	metadata *C.Metadata
+	timeout  time.Duration
 
-	mu       sync.Mutex
-	closed   bool
-	directMu sync.Mutex
-	direct   tun.DirectRouteDestination
+	mu     sync.Mutex
+	closed bool
 }
 
 func newICMPProxyDestination(
@@ -47,8 +43,6 @@ func newICMPProxyDestination(
 	back tun.DirectRouteContext,
 	proxy C.ICMPProxy,
 	metadata *C.Metadata,
-	source M.Socksaddr,
-	destination M.Socksaddr,
 	timeout time.Duration,
 ) *icmpProxyDestination {
 	ctx, cancel := context.WithCancel(parent)
@@ -56,14 +50,12 @@ func newICMPProxyDestination(
 		timeout = 10 * time.Second
 	}
 	return &icmpProxyDestination{
-		ctx:         ctx,
-		cancel:      cancel,
-		back:        back,
-		proxy:       proxy,
-		metadata:    metadata,
-		source:      source,
-		destination: destination,
-		timeout:     timeout,
+		ctx:      ctx,
+		cancel:   cancel,
+		back:     back,
+		proxy:    proxy,
+		metadata: metadata,
+		timeout:  timeout,
 	}
 }
 
@@ -99,31 +91,61 @@ func (h *ListenerHandler) prepareICMPProxy(
 		log.Debugln("[ICMP] %s matched no outbound", destination.Addr)
 		return nil
 	}
-	carrier, carrierName := icmpCarrier(proxy, metadata)
-	if carrier == nil {
-		log.Debugln("[ICMP] %s matches %s, which cannot carry an echo", destination.Addr, proxy.Name())
-		if metadata.Host == "" {
-			return nil
+	adapter, carrierName := icmpAdapter(proxy, metadata)
+	if adapter != nil {
+		// A carrier that knows the address the echo should travel to hands the
+		// flow to the direct path: the tool's own message is what leaves, and
+		// the answer comes back as the address the tool pinged.
+		if redirect, ok := C.ICMPRedirectOf(adapter); ok {
+			address, err := redirect.ICMPDestination(parent, metadata)
+			switch {
+			case err == nil && address.IsValid():
+				log.Infoln("[ICMP] %s %s --> %s using %s", metadata.NetWork.String(), source, destination, carrierName)
+				log.Debugln("[ICMP] %s sent to %s as it is", destination.Addr, address)
+				return newICMPDirectDestination(parent, routeContext, metadata, destination.Addr, address, timeout)
+			case err == nil:
+				// No address: the carrier moves this echo itself (see ICMPProxy).
+				log.Debugln("[ICMP] %s host=%q matches %s", destination.Addr, metadata.Host, carrierName)
+				log.Infoln("[ICMP] %s %s --> %s using %s", metadata.NetWork.String(), source, destination, carrierName)
+				return newICMPProxyDestination(parent, routeContext, carrierOf(adapter), metadata, timeout)
+			case errors.Is(err, icmptunnel.ErrLocalPath):
+				// The rules picked this node itself: it answers its own flows,
+				// so the echo keeps the path it would have had without a carrier.
+				log.Debugln("[ICMP] %s is this node: answering it here", destination.Addr)
+			default:
+				log.Debugln("[ICMP] %s: %s", destination.Addr, err)
+				return newICMPProxyDestination(parent, routeContext, unreachableCarrier{}, metadata, timeout)
+			}
+		} else if carrier, ok := C.ICMPCarrierOf(adapter); ok {
+			log.Debugln("[ICMP] %s host=%q matches %s", destination.Addr, metadata.Host, carrierName)
+			log.Infoln("[ICMP] %s %s --> %s using %s", metadata.NetWork.String(), source, destination, carrierName)
+			return newICMPProxyDestination(parent, routeContext, carrier, metadata, timeout)
 		}
-		// The flow names a host, so it deserves a real answer rather than the
-		// stack's fake reply: it keeps the direct path, with the address the
-		// name resolves to, and the answer written as the address that was
-		// pinged.
-		log.Debugln("[ICMP] %s is a name: answering it directly", metadata.Host)
-		return newICMPProxyDestination(parent, routeContext, localEchoCarrier{}, metadata, source, destination, timeout)
+	} else {
+		log.Debugln("[ICMP] %s matches %s, which cannot move an echo", destination.Addr, proxy.Name())
 	}
-	log.Debugln("[ICMP] %s host=%q matches %s", destination.Addr, metadata.Host, carrierName)
-	log.Infoln("[ICMP] %s %s --> %s using %s", metadata.NetWork.String(), source, destination, carrierName)
-	return newICMPProxyDestination(parent, routeContext, carrier, metadata, source, destination, timeout)
+	if metadata.Host == "" {
+		return nil
+	}
+	// The flow names a host, so it deserves a real answer rather than the
+	// stack's fake reply: resolve the name and let the tool's own echo travel
+	// to the address it stands for.
+	address, err := resolveForEcho(parent, metadata.Host, destination.Addr.Is6())
+	if err != nil {
+		log.Debugln("[ICMP] %s: %s", metadata.Host, err)
+		return newICMPProxyDestination(parent, routeContext, unreachableCarrier{}, metadata, timeout)
+	}
+	log.Infoln("[ICMP] %s %s --> %s using %s", metadata.NetWork.String(), source, destination, proxy.Name())
+	log.Debugln("[ICMP] %s sent to %s as it is", destination.Addr, address)
+	return newICMPDirectDestination(parent, routeContext, metadata, destination.Addr, address, timeout)
 }
 
-// localEchoCarrier stands in for "the rules picked an outbound that cannot move
-// an echo": the flow keeps the path it would have had without any ICMP carrier
-// at all, which is a real echo from this node.
-type localEchoCarrier struct{}
+// unreachableCarrier stands in for "this echo cannot be put on the wire as it
+// stands": the tunnel side answers with the error a router would send.
+type unreachableCarrier struct{}
 
-func (localEchoCarrier) ExchangeICMP(context.Context, *C.Metadata, []byte) ([]byte, error) {
-	return nil, icmptunnel.ErrLocalPath
+func (unreachableCarrier) ExchangeICMP(context.Context, *C.Metadata, []byte) ([]byte, error) {
+	return nil, icmptunnel.ErrUnreachable
 }
 
 // icmpCarrier finds the outbound that would carry the echo. A rule may name a
@@ -133,14 +155,24 @@ func (localEchoCarrier) ExchangeICMP(context.Context, *C.Metadata, []byte) ([]by
 // around the outbound - the one that closes it when the config is replaced -
 // embeds the adapter interface and hides everything else, so the adapter
 // underneath is asked too.
-func icmpCarrier(proxy C.Proxy, metadata *C.Metadata) (C.ICMPProxy, string) {
+func icmpAdapter(proxy C.Proxy, metadata *C.Metadata) (C.ProxyAdapter, string) {
 	for depth := 0; proxy != nil && depth < 8; depth++ {
-		if carrier, ok := C.ICMPCarrierOf(proxy.Adapter()); ok {
-			return carrier, proxy.Name()
+		adapter := proxy.Adapter()
+		if _, ok := C.ICMPCarrierOf(adapter); ok {
+			return adapter, proxy.Name()
+		}
+		if _, ok := C.ICMPRedirectOf(adapter); ok {
+			return adapter, proxy.Name()
 		}
 		proxy = proxy.Unwrap(metadata, false)
 	}
 	return nil, ""
+}
+
+// carrierOf hands the destination the interface it was asked for.
+func carrierOf(adapter C.ProxyAdapter) C.ICMPProxy {
+	carrier, _ := C.ICMPCarrierOf(adapter)
+	return carrier
 }
 
 func (d *icmpProxyDestination) WritePacket(packet *buf.Buffer) error {
@@ -158,24 +190,17 @@ func (d *icmpProxyDestination) WritePacket(packet *buf.Buffer) error {
 	if closed {
 		return nil
 	}
-	go d.exchange(request, reply, raw, ipVersion(raw) == 6)
+	go d.exchange(request, reply, raw)
 	return nil
 }
 
 // exchange asks the outbound for the reply and writes it back into the tunnel.
 // It runs in its own goroutine so a slow peer never blocks the packet loop.
-func (d *icmpProxyDestination) exchange(request []byte, builder replyBuilder, raw []byte, ipv6 bool) {
+func (d *icmpProxyDestination) exchange(request []byte, builder replyBuilder, raw []byte) {
 	ctx, cancel := context.WithTimeout(d.ctx, d.timeout)
 	defer cancel()
 	reply, err := d.proxy.ExchangeICMP(ctx, d.metadata, request)
 	if err != nil {
-		if errors.Is(err, icmptunnel.ErrLocalPath) {
-			// The outbound is this node: the echo has to take the direct path,
-			// which is built here because only this side holds the route
-			// context that keeps it from entering the rules again.
-			d.writeViaDirect(ctx, request, builder, raw, ipv6)
-			return
-		}
 		if errors.Is(err, icmptunnel.ErrUnreachable) {
 			// The echo cannot be put on the wire as it stands: answer with the
 			// error a router would send, so the tool reports a network failure
@@ -269,48 +294,94 @@ func (d *icmpProxyDestination) writeAnswer(builder replyBuilder, reply []byte) {
 	}
 }
 
-// writeViaDirect sends the echo down the path sing-tun uses when no outbound
-// carries ICMP - unless the destination is only a placeholder, in which case
-// the answer has to be made here: the tool pinged the placeholder, and a reply
-// that arrives from the name it stands for is not a reply it asked for.
-func (d *icmpProxyDestination) writeViaDirect(ctx context.Context, request []byte, builder replyBuilder, raw []byte, ipv6 bool) {
-	destination := d.destination
-	if resolver.IsFakeIP(destination.Addr) && d.metadata.Host != "" {
-		resolved, err := resolveForEcho(ctx, d.metadata.Host, ipv6)
-		if err != nil {
-			log.Debugln("[ICMP] %s: %s", d.metadata.RemoteAddress(), err)
-			return
-		}
-		log.Debugln("[ICMP] %s --> %s using DIRECT", d.metadata.RemoteAddress(), resolved)
-		reply, err := icmptunnel.Exchange(ctx, resolved, request, d.timeout)
-		if err != nil {
-			log.Debugln("[ICMP] %s: %s", resolved, err)
-			return
-		}
-		d.writeAnswer(builder, reply)
-		return
+// resolveForEcho answers with an address the given family can reach.
+func resolveForEcho(ctx context.Context, host string, ipv6 bool) (netip.Addr, error) {
+	if ipv6 {
+		return resolver.ResolveIPv6(ctx, host)
 	}
-	direct, err := d.directDestination(destination)
-	if err != nil {
-		log.Warnln("[ICMP] %s DIRECT: %s", d.metadata.RemoteAddress(), err)
-		return
+	return resolver.ResolveIPv4(ctx, host)
+}
+
+// icmpDirectDestination sends the tool's own echo to the address the flow
+// really means and writes the answer back as the address the tool pinged.
+//
+// A name is pinged as the placeholder the resolver handed out, and a peer is
+// pinged as its name; in both cases the message is already the right one, and
+// only the address on the wire has to be the real one. So the packet keeps its
+// bytes, the direct path carries it - the same one a raw address takes - and
+// the answer is readdressed to the placeholder before it is written into the
+// tunnel, because a tool drops an answer from an address it did not ping.
+type icmpDirectDestination struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
+	back     tun.DirectRouteContext
+	metadata *C.Metadata
+	pinged   netip.Addr
+	real     netip.Addr
+	timeout  time.Duration
+
+	mu     sync.Mutex
+	closed bool
+	direct tun.DirectRouteDestination
+}
+
+func newICMPDirectDestination(
+	parent context.Context,
+	back tun.DirectRouteContext,
+	metadata *C.Metadata,
+	pinged netip.Addr,
+	real netip.Addr,
+	timeout time.Duration,
+) *icmpDirectDestination {
+	ctx, cancel := context.WithCancel(parent)
+	if timeout <= 0 {
+		timeout = 10 * time.Second
 	}
-	log.Debugln("[ICMP] %s --> %s using DIRECT", d.metadata.RemoteAddress(), destination)
-	if err := direct.WritePacket(buf.As(raw).ToOwned()); err != nil {
-		log.Debugln("[ICMP] %s DIRECT: %s", d.metadata.RemoteAddress(), err)
+	return &icmpDirectDestination{
+		ctx:      ctx,
+		cancel:   cancel,
+		back:     back,
+		metadata: metadata,
+		pinged:   pinged,
+		real:     real,
+		timeout:  timeout,
 	}
 }
 
-// directDestination keeps the DIRECT socket for as long as this flow lives: it
-// holds the requests it sent and the source the answers come back to, so a
-// fresh one per echo would also mean a fresh answer table per echo.
-func (d *icmpProxyDestination) directDestination(destination M.Socksaddr) (tun.DirectRouteDestination, error) {
-	d.directMu.Lock()
-	defer d.directMu.Unlock()
+func (d *icmpDirectDestination) WritePacket(packet *buf.Buffer) error {
+	raw := append([]byte(nil), packet.Bytes()...)
+	packet.Release()
+	d.mu.Lock()
+	closed := d.closed
+	d.mu.Unlock()
+	if closed {
+		return nil
+	}
+	direct, err := d.destination()
+	if err != nil {
+		log.Warnln("[ICMP] %s: %s", d.metadata.RemoteAddress(), err)
+		return nil
+	}
+	if err := direct.WritePacket(buf.As(readdress(raw, d.real, false)).ToOwned()); err != nil {
+		log.Debugln("[ICMP] %s: %s", d.metadata.RemoteAddress(), err)
+	}
+	return nil
+}
+
+// destination keeps the direct socket for as long as the flow lives: it holds
+// the requests it sent and the source their answers come back to, so a fresh
+// one per echo would mean a fresh answer table per echo.
+func (d *icmpDirectDestination) destination() (tun.DirectRouteDestination, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.direct != nil && !d.direct.IsClosed() {
 		return d.direct, nil
 	}
-	direct, err := directICMPDestination(destination, d.back, d.timeout)
+	direct, err := directICMPDestination(
+		M.SocksaddrFrom(d.real, 0),
+		readdressedRoute{back: d.back, source: d.pinged},
+		d.timeout,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -318,12 +389,77 @@ func (d *icmpProxyDestination) directDestination(destination M.Socksaddr) (tun.D
 	return direct, nil
 }
 
-// resolveForEcho answers with an address the given family can reach.
-func resolveForEcho(ctx context.Context, host string, ipv6 bool) (netip.Addr, error) {
-	if ipv6 {
-		return resolver.ResolveIPv6(ctx, host)
+func (d *icmpDirectDestination) Close() error {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil
 	}
-	return resolver.ResolveIPv4(ctx, host)
+	d.closed = true
+	direct := d.direct
+	d.direct = nil
+	d.mu.Unlock()
+	d.cancel()
+	if direct != nil {
+		return direct.Close()
+	}
+	return nil
+}
+
+func (d *icmpDirectDestination) IsClosed() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closed
+}
+
+// readdressedRoute writes every answer back as the address the tool pinged.
+type readdressedRoute struct {
+	back   tun.DirectRouteContext
+	source netip.Addr
+}
+
+func (r readdressedRoute) WritePacket(packet []byte) error {
+	return r.back.WritePacket(readdress(packet, r.source, true))
+}
+
+// readdress writes [address] into one end of a packet: the destination when the
+// packet is a request on its way out, the source when it is the answer coming
+// back. The checksums that cover an address are recomputed - the IPv4 header's
+// always, and ICMPv6's, whose pseudo header names both ends.
+func readdress(packet []byte, address netip.Addr, asSource bool) []byte {
+	switch ipVersion(packet) {
+	case 4:
+		if len(packet) < 20 || !address.Is4() {
+			return packet
+		}
+		out := append([]byte(nil), packet...)
+		offset := 16
+		if asSource {
+			offset = 12
+		}
+		copy(out[offset:offset+4], address.AsSlice())
+		out[10], out[11] = 0, 0
+		binary.BigEndian.PutUint16(out[10:12], checksum(out[:20]))
+		return out
+	case 6:
+		if len(packet) < 40+8 || !address.Is6() {
+			return packet
+		}
+		out := append([]byte(nil), packet...)
+		offset := 24
+		if asSource {
+			offset = 8
+		}
+		address16 := address.As16()
+		copy(out[offset:offset+16], address16[:])
+		source := netip.AddrFrom16([16]byte(out[8:24]))
+		destination := netip.AddrFrom16([16]byte(out[24:40]))
+		binary.BigEndian.PutUint16(out[42:44], 0)
+		binary.BigEndian.PutUint16(out[42:44], icmpv6Checksum(source, destination, out[40:]))
+		return out
+	default:
+		return packet
+	}
 }
 
 // ipVersion reads the family the packet was written for.
@@ -339,13 +475,6 @@ func (d *icmpProxyDestination) Close() error {
 	alreadyClosed := d.closed
 	d.closed = true
 	d.mu.Unlock()
-	d.directMu.Lock()
-	direct := d.direct
-	d.direct = nil
-	d.directMu.Unlock()
-	if direct != nil {
-		_ = direct.Close()
-	}
 	if !alreadyClosed {
 		d.cancel()
 	}

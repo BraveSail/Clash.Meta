@@ -170,6 +170,16 @@ type ICMPProxy interface {
 	ExchangeICMP(ctx context.Context, metadata *Metadata, request []byte) ([]byte, error)
 }
 
+// ICMPRedirect is implemented by a carrier that cannot move an echo itself but
+// knows which address can - a peer, for instance, is reachable at the address
+// the directory publishes for it. The flow keeps the tool's own message and
+// runs the direct path to that address, and the answer is written back as the
+// address the tool pinged. A carrier that answers with no address keeps the
+// echo and carries it itself (see ICMPProxy).
+type ICMPRedirect interface {
+	ICMPDestination(ctx context.Context, metadata *Metadata) (netip.Addr, error)
+}
+
 // ProxyAdapterWrapper is implemented by an adapter that decorates another one.
 // The decorator embeds the ProxyAdapter interface, so an optional interface the
 // adapter underneath implements - ICMPProxy, for one - cannot be reached by a
@@ -184,6 +194,22 @@ func ICMPCarrierOf(adapter ProxyAdapter) (ICMPProxy, bool) {
 	for depth := 0; adapter != nil && depth < 8; depth++ {
 		if carrier, ok := adapter.(ICMPProxy); ok {
 			return carrier, true
+		}
+		wrapper, ok := adapter.(ProxyAdapterWrapper)
+		if !ok {
+			break
+		}
+		adapter = wrapper.WrappedProxyAdapter()
+	}
+	return nil, false
+}
+
+// ICMPRedirectOf answers whether an adapter names the address an echo aimed at
+// it has to travel to, looking through the decorators that hide it.
+func ICMPRedirectOf(adapter ProxyAdapter) (ICMPRedirect, bool) {
+	for depth := 0; adapter != nil && depth < 8; depth++ {
+		if redirect, ok := adapter.(ICMPRedirect); ok {
+			return redirect, true
 		}
 		wrapper, ok := adapter.(ProxyAdapterWrapper)
 		if !ok {
