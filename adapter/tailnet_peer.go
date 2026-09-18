@@ -46,23 +46,8 @@ type TailnetPeerOption struct {
 	// Heartbeat is how often the directory client this outbound shares reports
 	// even when nothing changed, in seconds; the inline form of the directory
 	// takes the same option as a `peer-directory` outbound would.
-	Heartbeat int `proxy:"heartbeat,omitempty"`
-	// ICMPPort is where the peer's responder listens for a carried echo. It
-	// defaults to one above the tunnel's own port, so a shared profile needs no
-	// extra setting.
-	ICMPPort int `proxy:"icmp-port,omitempty"`
-	// ICMP chooses how an echo aimed at the peer itself travels. "direct" (the
-	// default) sends it to the peer's own address, which is what a node on the
-	// same network would do; "carried" wraps it for the peer's responder, which
-	// is the way in when the peer does not answer ICMP from the outside.
-	ICMP  string         `proxy:"icmp,omitempty"`
-	Proxy map[string]any `proxy:"proxy"`
-}
-
-// icmpDirect reports whether an echo aimed at the peer goes to the peer's own
-// address instead of being carried through the tunnel.
-func (o TailnetPeerOption) icmpDirect() bool {
-	return !strings.EqualFold(strings.TrimSpace(o.ICMP), "carried")
+	Heartbeat int            `proxy:"heartbeat,omitempty"`
+	Proxy     map[string]any `proxy:"proxy"`
 }
 
 // directoryID is the name this node reports under: the app's own setting when it
@@ -89,11 +74,6 @@ type TailnetPeer struct {
 	cachedHost string
 	cachedSelf bool
 	resolvedAt time.Time
-
-	// echoMu keeps one carried echo in flight per session, and echo is the
-	// tunnel session carried echoes share.
-	echoMu sync.Mutex
-	echo   *tailnetEchoSession
 }
 
 func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
@@ -341,15 +321,6 @@ func (t *TailnetPeer) Close() error {
 		releaseDirectoryClient(t.directory)
 		t.directory = nil
 	}
-	t.echoMu.Lock()
-	t.mu.Lock()
-	session := t.echo
-	t.echo = nil
-	t.mu.Unlock()
-	if session != nil {
-		_ = session.conn.Close()
-	}
-	t.echoMu.Unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.inner != nil {

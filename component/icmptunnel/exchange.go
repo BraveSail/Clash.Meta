@@ -19,6 +19,11 @@ var (
 	// node's own rules again, so the flow has to keep the direct path it would
 	// have had without an ICMP carrier.
 	ErrLocalPath = errors.New("icmp tunnel: this node carries the echo")
+	// ErrUnreachable says the echo cannot be put on the wire as it stands - the
+	// address is of another family, or the rules asked a node that is not the
+	// target to emit it. The tunnel side answers with the error a router would
+	// send, so the tool reports a network failure instead of waiting.
+	ErrUnreachable = errors.New("icmp tunnel: destination unreachable")
 )
 
 // EchoRequest describes the message a responder has to put on the wire.

@@ -85,6 +85,50 @@ func TestParseEchoRejectsWhatItCannotAnswer(t *testing.T) {
 	}
 }
 
+// An echo that cannot be put on the wire is answered the way a router answers:
+// the tool is told the destination cannot be reached, and its own packet
+// travels inside the error so it can match the two.
+func TestUnreachableReplyQuotesThePacket(t *testing.T) {
+	request := echoRequest(8, 0x1234, 7, []byte("payload"))
+	packet := ipv4Packet(netip.MustParseAddr("7.0.0.0"), netip.MustParseAddr("7.0.0.4"), request)
+	answer, err := unreachableReply(packet)
+	if err != nil {
+		t.Fatalf("unreachableReply: %v", err)
+	}
+	if answer[20] != 3 || answer[21] != 1 {
+		t.Fatalf("error type %d code %d, want destination unreachable/host", answer[20], answer[21])
+	}
+	if got := netip.AddrFrom4([4]byte(answer[12:16])); got.String() != "7.0.0.4" {
+		t.Fatalf("error comes from %s, want the address that was pinged", got)
+	}
+	if got := answer[28:]; string(got) != string(packet[:28]) {
+		t.Fatal("the packet that could not be delivered is not quoted in the error")
+	}
+	if sum := checksum(answer[:20]); sum != 0 {
+		t.Fatalf("IPv4 header checksum does not verify: %#x", sum)
+	}
+	if sum := checksum(answer[20:]); sum != 0 {
+		t.Fatalf("ICMPv4 checksum does not verify: %#x", sum)
+	}
+
+	packet6 := ipv6Packet(netip.MustParseAddr("fd7a:115c:a1e0::1"), netip.MustParseAddr("2001::fdfe:dcba:9876:4"), echoRequest(128, 1, 1, nil))
+	answer6, err := unreachableReply(packet6)
+	if err != nil {
+		t.Fatalf("unreachableReply: %v", err)
+	}
+	if answer6[40] != 1 || answer6[41] != 0 {
+		t.Fatalf("error type %d code %d, want destination unreachable/no route", answer6[40], answer6[41])
+	}
+	if got := answer6[48:]; string(got) != string(packet6[:48]) {
+		t.Fatal("the packet that could not be delivered is not quoted in the error")
+	}
+	source := netip.AddrFrom16([16]byte(answer6[8:24]))
+	destination := netip.AddrFrom16([16]byte(answer6[24:40]))
+	if sum := icmpv6Checksum(source, destination, answer6[40:]); sum != 0 {
+		t.Fatalf("ICMPv6 checksum does not verify: %#x", sum)
+	}
+}
+
 // echoRequest builds an ICMP echo message: type, code, checksum, id, sequence.
 func echoRequest(kind byte, id uint16, sequence uint16, payload []byte) []byte {
 	message := make([]byte, 8+len(payload))

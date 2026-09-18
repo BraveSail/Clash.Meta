@@ -102,11 +102,28 @@ func (h *ListenerHandler) prepareICMPProxy(
 	carrier, carrierName := icmpCarrier(proxy, metadata)
 	if carrier == nil {
 		log.Debugln("[ICMP] %s matches %s, which cannot carry an echo", destination.Addr, proxy.Name())
-		return nil
+		if metadata.Host == "" {
+			return nil
+		}
+		// The flow names a host, so it deserves a real answer rather than the
+		// stack's fake reply: it keeps the direct path, with the address the
+		// name resolves to, and the answer written as the address that was
+		// pinged.
+		log.Debugln("[ICMP] %s is a name: answering it directly", metadata.Host)
+		return newICMPProxyDestination(parent, routeContext, localEchoCarrier{}, metadata, source, destination, timeout)
 	}
 	log.Debugln("[ICMP] %s host=%q matches %s", destination.Addr, metadata.Host, carrierName)
 	log.Infoln("[ICMP] %s %s --> %s using %s", metadata.NetWork.String(), source, destination, carrierName)
 	return newICMPProxyDestination(parent, routeContext, carrier, metadata, source, destination, timeout)
+}
+
+// localEchoCarrier stands in for "the rules picked an outbound that cannot move
+// an echo": the flow keeps the path it would have had without any ICMP carrier
+// at all, which is a real echo from this node.
+type localEchoCarrier struct{}
+
+func (localEchoCarrier) ExchangeICMP(context.Context, *C.Metadata, []byte) ([]byte, error) {
+	return nil, icmptunnel.ErrLocalPath
 }
 
 // icmpCarrier finds the outbound that would carry the echo. A rule may name a
@@ -159,10 +176,84 @@ func (d *icmpProxyDestination) exchange(request []byte, builder replyBuilder, ra
 			d.writeViaDirect(ctx, request, builder, raw, ipv6)
 			return
 		}
+		if errors.Is(err, icmptunnel.ErrUnreachable) {
+			// The echo cannot be put on the wire as it stands: answer with the
+			// error a router would send, so the tool reports a network failure
+			// instead of waiting for an answer that cannot come.
+			d.writeUnreachable(raw)
+			return
+		}
 		log.Debugln("[ICMP] %s %s: %s", d.metadata.SourceDetail(), d.metadata.RemoteAddress(), err)
 		return
 	}
 	d.writeAnswer(builder, reply)
+}
+
+// writeUnreachable answers an echo that cannot be delivered with the error a
+// router would send: the packet that could not be delivered plus the first
+// eight bytes of its message, which is what the tool matches its own request
+// with.
+func (d *icmpProxyDestination) writeUnreachable(raw []byte) {
+	packet, err := unreachableReply(raw)
+	if err != nil {
+		log.Debugln("[ICMP] %s: %s", d.metadata.RemoteAddress(), err)
+		return
+	}
+	log.Debugln("[ICMP] %s cannot be reached as it stands: answering unreachable", d.metadata.RemoteAddress())
+	if err := d.back.WritePacket(packet); err != nil {
+		log.Debugln("[ICMP] unreachable answer for %s: %s", d.metadata.RemoteAddress(), err)
+	}
+}
+
+// unreachableReply builds the ICMP error for a packet this node will not put
+// on the wire: source and destination swap, the error type says the destination
+// cannot be reached, and the original header and message travel inside it.
+func unreachableReply(raw []byte) ([]byte, error) {
+	switch ipVersion(raw) {
+	case 4:
+		if len(raw) < 20 {
+			return nil, errors.New("truncated IPv4 packet")
+		}
+		headerLength := int(raw[0]&0x0f) * 4
+		if headerLength < 20 || len(raw) < headerLength+8 {
+			return nil, errors.New("invalid IPv4 header length")
+		}
+		embed := raw[:headerLength+8]
+		packet := make([]byte, 20+8+len(embed))
+		packet[0] = 0x45
+		binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
+		packet[8] = 64 // ttl
+		packet[9] = 1  // icmp
+		copy(packet[12:16], raw[16:20])
+		copy(packet[16:20], raw[12:16])
+		binary.BigEndian.PutUint16(packet[10:12], checksum(packet[:20]))
+		packet[20] = 3 // destination unreachable
+		packet[21] = 1 // host unreachable
+		copy(packet[28:], embed)
+		binary.BigEndian.PutUint16(packet[22:24], checksum(packet[20:]))
+		return packet, nil
+	case 6:
+		if len(raw) < 40+8 {
+			return nil, errors.New("truncated IPv6 packet")
+		}
+		embed := raw[:40+8]
+		packet := make([]byte, 40+8+len(embed))
+		packet[0] = 0x60
+		binary.BigEndian.PutUint16(packet[4:6], uint16(8+len(embed)))
+		packet[6] = 58 // icmpv6
+		packet[7] = 64 // hop limit
+		copy(packet[8:24], raw[24:40])
+		copy(packet[24:40], raw[8:24])
+		packet[40] = 1 // destination unreachable
+		packet[41] = 0 // no route to destination
+		copy(packet[48:], embed)
+		source := netip.AddrFrom16([16]byte(packet[8:24]))
+		destination := netip.AddrFrom16([16]byte(packet[24:40]))
+		binary.BigEndian.PutUint16(packet[42:44], icmpv6Checksum(source, destination, packet[40:]))
+		return packet, nil
+	default:
+		return nil, errors.New("not an IP packet")
+	}
 }
 
 // writeAnswer hands the message an outbound returned to the packet builder and
