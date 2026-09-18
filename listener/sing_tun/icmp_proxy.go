@@ -114,7 +114,15 @@ func (h *ListenerHandler) prepareICMPProxy(
 				log.Debugln("[ICMP] %s is this node: answering it here", destination.Addr)
 			default:
 				log.Debugln("[ICMP] %s: %s", destination.Addr, err)
-				return newICMPProxyDestination(parent, routeContext, unreachableCarrier{}, metadata, timeout)
+				if errors.Is(err, icmptunnel.ErrUnreachable) {
+					return newICMPProxyDestination(parent, routeContext, unreachableCarrier{}, metadata, timeout)
+				}
+				// The flow could not be placed at all - a name with no address,
+				// a peer the directory does not know yet. Nothing answers, and
+				// the tool times out, which is what a path that is not there
+				// looks like; a routing error would be a lie about a peer that
+				// exists.
+				return newICMPProxyDestination(parent, routeContext, silentCarrier{}, metadata, timeout)
 			}
 		} else if carrier, ok := C.ICMPCarrierOf(adapter); ok {
 			log.Debugln("[ICMP] %s host=%q matches %s", destination.Addr, metadata.Host, carrierName)
@@ -133,7 +141,7 @@ func (h *ListenerHandler) prepareICMPProxy(
 	address, err := resolveForEcho(parent, metadata.Host, destination.Addr.Is6())
 	if err != nil {
 		log.Debugln("[ICMP] %s: %s", metadata.Host, err)
-		return newICMPProxyDestination(parent, routeContext, unreachableCarrier{}, metadata, timeout)
+		return newICMPProxyDestination(parent, routeContext, silentCarrier{}, metadata, timeout)
 	}
 	log.Infoln("[ICMP] %s %s --> %s using %s", metadata.NetWork.String(), source, destination, proxy.Name())
 	log.Debugln("[ICMP] %s sent to %s as it is", destination.Addr, address)
@@ -147,6 +155,16 @@ type unreachableCarrier struct{}
 func (unreachableCarrier) ExchangeICMP(context.Context, *C.Metadata, []byte) ([]byte, error) {
 	return nil, icmptunnel.ErrUnreachable
 }
+
+// silentCarrier stands in for "this echo cannot be placed right now": it is
+// dropped, so the tool times out rather than being told a route does not exist.
+type silentCarrier struct{}
+
+func (silentCarrier) ExchangeICMP(context.Context, *C.Metadata, []byte) ([]byte, error) {
+	return nil, errEchoNotPlaced
+}
+
+var errEchoNotPlaced = errors.New("icmp: the flow could not be placed")
 
 // icmpCarrier finds the outbound that would carry the echo. A rule may name a
 // group, and what a group dials is what it would have carried this echo with:
@@ -205,7 +223,7 @@ func (d *icmpProxyDestination) exchange(request []byte, builder replyBuilder, ra
 			// The echo cannot be put on the wire as it stands: answer with the
 			// error a router would send, so the tool reports a network failure
 			// instead of waiting for an answer that cannot come.
-			d.writeUnreachable(raw)
+			d.writeUnreachable(raw, err)
 			return
 		}
 		log.Debugln("[ICMP] %s %s: %s", d.metadata.SourceDetail(), d.metadata.RemoteAddress(), err)
@@ -218,13 +236,13 @@ func (d *icmpProxyDestination) exchange(request []byte, builder replyBuilder, ra
 // router would send: the packet that could not be delivered plus the first
 // eight bytes of its message, which is what the tool matches its own request
 // with.
-func (d *icmpProxyDestination) writeUnreachable(raw []byte) {
+func (d *icmpProxyDestination) writeUnreachable(raw []byte, reason error) {
 	packet, err := unreachableReply(raw)
 	if err != nil {
 		log.Debugln("[ICMP] %s: %s", d.metadata.RemoteAddress(), err)
 		return
 	}
-	log.Debugln("[ICMP] %s cannot be reached as it stands: answering unreachable", d.metadata.RemoteAddress())
+	log.Debugln("[ICMP] %s cannot be reached as it stands: answering unreachable (%s)", d.metadata.RemoteAddress(), reason)
 	if err := d.back.WritePacket(packet); err != nil {
 		log.Debugln("[ICMP] unreachable answer for %s: %s", d.metadata.RemoteAddress(), err)
 	}

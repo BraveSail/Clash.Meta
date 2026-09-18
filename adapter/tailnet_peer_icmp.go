@@ -51,16 +51,15 @@ func (t *TailnetPeer) ICMPDestination(ctx context.Context, metadata *C.Metadata)
 		// The rules asked this peer to emit an echo from its own network. That
 		// is the one thing this outbound does not do: only the peer can answer
 		// for itself.
-		log.Debugln("[ICMP] %s %s is not %s: unreachable", t.Name(), metadata.RemoteAddress(), t.Name())
-		return netip.Addr{}, icmptunnel.ErrUnreachable
+		return netip.Addr{}, fmt.Errorf("%w: %s is not the peer this outbound answers for",
+			icmptunnel.ErrUnreachable, metadata.RemoteAddress())
 	}
 	if peerAddr.Is6() != metadata.DstIP.Is6() {
 		// The tool asked in the other family - an IPv4 echo for a peer that only
 		// has an IPv6 address. Re-typing it would be inventing a packet the tool
 		// never sent.
-		log.Debugln("[ICMP] %s %s is %s and the echo is not: unreachable",
-			t.Name(), metadata.RemoteAddress(), familyName(peerAddr.Is6()))
-		return netip.Addr{}, icmptunnel.ErrUnreachable
+		return netip.Addr{}, fmt.Errorf("%w: %s is %s and the echo is %s - ping the family the peer has",
+			icmptunnel.ErrUnreachable, metadata.RemoteAddress(), familyName(peerAddr.Is6()), familyName(metadata.DstIP.Is6()))
 	}
 	return peerAddr, nil
 }
@@ -74,7 +73,7 @@ func (t *TailnetPeer) ExchangeICMP(ctx context.Context, metadata *C.Metadata, re
 		return nil, err
 	}
 	if !self {
-		return nil, icmptunnel.ErrUnreachable
+		return nil, fmt.Errorf("%w: %s was placed here but is not this node", icmptunnel.ErrUnreachable, metadata.RemoteAddress())
 	}
 	if !t.destinationIsThePeer(metadata) {
 		return nil, icmptunnel.ErrLocalPath
