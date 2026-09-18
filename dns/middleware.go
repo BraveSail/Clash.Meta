@@ -146,7 +146,7 @@ func withMapping(mapping *lru.LruCache[netip.Addr, string]) middleware {
 	}
 }
 
-func withFakeIP(skipper *fakeip.Skipper, fakePool *fakeip.Pool, fakePool6 *fakeip.Pool, fakeIPTTL int) middleware {
+func withFakeIP(skipper *fakeip.Skipper, onlyAAAA *fakeip.Skipper, fakePool *fakeip.Pool, fakePool6 *fakeip.Pool, fakeIPTTL int) middleware {
 	return func(next handler) handler {
 		return func(ctx *icontext.DNSContext, r *D.Msg) (*D.Msg, error) {
 			q := r.Question[0]
@@ -154,6 +154,12 @@ func withFakeIP(skipper *fakeip.Skipper, fakePool *fakeip.Pool, fakePool6 *fakei
 			host := strings.TrimRight(q.Name, ".")
 			if skipper.ShouldSkipped(host) {
 				return next(ctx, r)
+			}
+			// A host that only has an IPv6 address is answered as one: leaving
+			// the A query unanswered is what makes a tool ask for the address it
+			// can actually reach instead of a placeholder it cannot.
+			if q.Qtype == D.TypeA && onlyAAAA != nil && onlyAAAA.ShouldSkipped(host) {
+				return handleMsgWithEmptyAnswer(r), nil
 			}
 
 			var rr D.RR
@@ -238,7 +244,7 @@ func newHandler(resolver resolver.Resolver, mapper *ResolverEnhancer) handler {
 	}
 
 	if mapper.mode == C.DNSFakeIP {
-		middlewares = append(middlewares, withFakeIP(mapper.fakeIPSkipper, mapper.fakeIPPool, mapper.fakeIPPool6, mapper.fakeIPTTL))
+		middlewares = append(middlewares, withFakeIP(mapper.fakeIPSkipper, mapper.fakeIPAAAAOnly, mapper.fakeIPPool, mapper.fakeIPPool6, mapper.fakeIPTTL))
 	}
 
 	if mapper.mode != C.DNSNormal {

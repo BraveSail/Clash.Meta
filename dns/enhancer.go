@@ -15,9 +15,12 @@ type ResolverEnhancer struct {
 	fakeIPPool    *fakeip.Pool
 	fakeIPPool6   *fakeip.Pool
 	fakeIPSkipper *fakeip.Skipper
-	fakeIPTTL     int
-	mapping       *lru.LruCache[netip.Addr, string]
-	useHosts      bool
+	// fakeIPAAAAOnly names hosts whose A query is left unanswered, so a tool
+	// asks for the address they have instead of a placeholder it cannot use.
+	fakeIPAAAAOnly *fakeip.Skipper
+	fakeIPTTL      int
+	mapping        *lru.LruCache[netip.Addr, string]
+	useHosts       bool
 }
 
 func (h *ResolverEnhancer) FakeIPEnabled() bool {
@@ -159,13 +162,14 @@ func (h *ResolverEnhancer) StoreFakePoolState() {
 }
 
 type EnhancerConfig struct {
-	IPv6          bool
-	EnhancedMode  C.DNSMode
-	FakeIPPool    *fakeip.Pool
-	FakeIPPool6   *fakeip.Pool
-	FakeIPSkipper *fakeip.Skipper
-	FakeIPTTL     int
-	UseHosts      bool
+	IPv6           bool
+	EnhancedMode   C.DNSMode
+	FakeIPPool     *fakeip.Pool
+	FakeIPPool6    *fakeip.Pool
+	FakeIPSkipper  *fakeip.Skipper
+	FakeIPAAAAOnly *fakeip.Skipper
+	FakeIPTTL      int
+	UseHosts       bool
 }
 
 func NewEnhancer(cfg EnhancerConfig) *ResolverEnhancer {
@@ -181,6 +185,7 @@ func NewEnhancer(cfg EnhancerConfig) *ResolverEnhancer {
 			e.fakeIPPool6 = cfg.FakeIPPool6
 		}
 		e.fakeIPSkipper = cfg.FakeIPSkipper
+		e.fakeIPAAAAOnly = cfg.FakeIPAAAAOnly
 		e.fakeIPTTL = cfg.FakeIPTTL
 		if e.fakeIPTTL < 1 {
 			e.fakeIPTTL = 1

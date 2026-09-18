@@ -167,6 +167,7 @@ type DNS struct {
 	FakeIPRange6          netip.Prefix
 	FakeIPPool6           *fakeip.Pool
 	FakeIPSkipper         *fakeip.Skipper
+	FakeIPAAAAOnly        *fakeip.Skipper
 	FakeIPTTL             int
 	NameServerPolicy      []dns.Policy
 	ProxyServerNameserver []dns.NameServer
@@ -219,23 +220,27 @@ type RawCors struct {
 }
 
 type RawDNS struct {
-	Enable                       bool                                `yaml:"enable" json:"enable"`
-	PreferH3                     bool                                `yaml:"prefer-h3" json:"prefer-h3"`
-	IPv6                         bool                                `yaml:"ipv6" json:"ipv6"`
-	IPv6Timeout                  uint                                `yaml:"ipv6-timeout" json:"ipv6-timeout"`
-	UseHosts                     bool                                `yaml:"use-hosts" json:"use-hosts"`
-	UseSystemHosts               bool                                `yaml:"use-system-hosts" json:"use-system-hosts"`
-	RespectRules                 bool                                `yaml:"respect-rules" json:"respect-rules"`
-	NameServer                   []string                            `yaml:"nameserver" json:"nameserver"`
-	Fallback                     []string                            `yaml:"fallback" json:"fallback"`
-	FallbackFilter               RawFallbackFilter                   `yaml:"fallback-filter" json:"fallback-filter"`
-	FallbackLazyQuery            bool                                `yaml:"fallback-lazy-query" json:"fallback-lazy-query"`
-	Listen                       string                              `yaml:"listen" json:"listen"`
-	ListenRoutingMark            int                                 `yaml:"listen-routing-mark" json:"listen-routing-mark"`
-	EnhancedMode                 C.DNSMode                           `yaml:"enhanced-mode" json:"enhanced-mode"`
-	FakeIPRange                  string                              `yaml:"fake-ip-range" json:"fake-ip-range"`
-	FakeIPRange6                 string                              `yaml:"fake-ip-range6" json:"fake-ip-range6"`
-	FakeIPFilter                 []string                            `yaml:"fake-ip-filter" json:"fake-ip-filter"`
+	Enable            bool              `yaml:"enable" json:"enable"`
+	PreferH3          bool              `yaml:"prefer-h3" json:"prefer-h3"`
+	IPv6              bool              `yaml:"ipv6" json:"ipv6"`
+	IPv6Timeout       uint              `yaml:"ipv6-timeout" json:"ipv6-timeout"`
+	UseHosts          bool              `yaml:"use-hosts" json:"use-hosts"`
+	UseSystemHosts    bool              `yaml:"use-system-hosts" json:"use-system-hosts"`
+	RespectRules      bool              `yaml:"respect-rules" json:"respect-rules"`
+	NameServer        []string          `yaml:"nameserver" json:"nameserver"`
+	Fallback          []string          `yaml:"fallback" json:"fallback"`
+	FallbackFilter    RawFallbackFilter `yaml:"fallback-filter" json:"fallback-filter"`
+	FallbackLazyQuery bool              `yaml:"fallback-lazy-query" json:"fallback-lazy-query"`
+	Listen            string            `yaml:"listen" json:"listen"`
+	ListenRoutingMark int               `yaml:"listen-routing-mark" json:"listen-routing-mark"`
+	EnhancedMode      C.DNSMode         `yaml:"enhanced-mode" json:"enhanced-mode"`
+	FakeIPRange       string            `yaml:"fake-ip-range" json:"fake-ip-range"`
+	FakeIPRange6      string            `yaml:"fake-ip-range6" json:"fake-ip-range6"`
+	FakeIPFilter      []string          `yaml:"fake-ip-filter" json:"fake-ip-filter"`
+	// FakeIPAAAAOnly names hosts whose A query is left unanswered, so a tool
+	// asks for the address they really have instead of a placeholder it cannot
+	// use. A peer that only holds an IPv6 address is the case this exists for.
+	FakeIPAAAAOnly               []string                            `yaml:"fake-ip-aaaa-only" json:"fake-ip-aaaa-only"`
 	FakeIPFilterMode             C.FilterMode                        `yaml:"fake-ip-filter-mode" json:"fake-ip-filter-mode"`
 	FakeIPTTL                    int                                 `yaml:"fake-ip-ttl" json:"fake-ip-ttl"`
 	DefaultNameserver            []string                            `yaml:"default-nameserver" json:"default-nameserver"`
@@ -1517,6 +1522,17 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 		}
 
 		dnsCfg.FakeIPSkipper = skipper
+		if len(cfg.FakeIPAAAAOnly) > 0 {
+			// A trie of its own: the filter above decides what is not faked at
+			// all, and this list decides only which family is answered.
+			onlyAAAA := &fakeip.Skipper{}
+			host, err := parseDomain(cfg.FakeIPAAAAOnly, trie.New[struct{}](), "dns.fake-ip-aaaa-only", ruleProviders)
+			if err != nil {
+				return nil, err
+			}
+			onlyAAAA.Host = host
+			dnsCfg.FakeIPAAAAOnly = onlyAAAA
+		}
 		dnsCfg.FakeIPTTL = cfg.FakeIPTTL
 
 		if dnsCfg.FakeIPRange.IsValid() {
