@@ -189,6 +189,41 @@ func TestPeerDirectoryLooksUpPeersAndAnswersForItself(t *testing.T) {
 
 // A directory that reports which nodes are up needs a heartbeat: the address
 // did not move, but the node is still there.
+// A route change arrives as a burst - the platform reports every route the
+// change touches - and the directory is asked once, not once per event.
+func TestNetworkChangeCoalescesARouteBurst(t *testing.T) {
+	stub, server := newDirectoryStub(t, "2409:8a55::1")
+	directory := newTestDirectory(t, server.URL)
+
+	// Let the report the directory makes on its own when it starts finish, and
+	// wait for the reports to go quiet: this test measures the injections.
+	quiet := time.Now().Add(5 * time.Second)
+	last := stub.reports.Load()
+	for time.Now().Before(quiet) {
+		time.Sleep(50 * time.Millisecond)
+		if now := stub.reports.Load(); now != last {
+			last = now
+			quiet = time.Now().Add(500 * time.Millisecond)
+		}
+	}
+
+	directory.InjectNetworkChange()
+	reported := time.Now().Add(5 * time.Second)
+	for stub.reports.Load() == last && time.Now().Before(reported) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	first := stub.reports.Load()
+	if first == last {
+		t.Fatal("a network change did not report")
+	}
+	directory.InjectNetworkChange()
+	directory.InjectNetworkChange()
+	time.Sleep(500 * time.Millisecond)
+	if got := stub.reports.Load(); got != first {
+		t.Fatalf("reports = %d, want the burst to be one report", got)
+	}
+}
+
 func TestPeerDirectoryHeartbeatsWhenTheAddressIsUnchanged(t *testing.T) {
 	stub, server := newDirectoryStub(t, "2409:8a55::1")
 	directory := newTestDirectory(t, server.URL)

@@ -71,9 +71,10 @@ type PeerDirectory struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu   sync.Mutex
-	etag string
-	addr string
+	mu         sync.Mutex
+	etag       string
+	addr       string
+	lastInject time.Time
 	// underlayAddr is the address of the network carrying traffic; only
 	// Android maintains it (see peer_directory_underlay_android.go).
 	underlayAddr      netip.Addr
@@ -512,6 +513,16 @@ func (d *PeerDirectory) resetWarning() {
 // reason a report leaves the machine, and the app knows about an interface
 // switch before the next poll does.
 func (d *PeerDirectory) InjectNetworkChange() {
+	// A route change is a burst, not one event: the platform reports every route
+	// the change touches, and each report would ask the directory the same
+	// question. One answer per few seconds is the same answer.
+	d.mu.Lock()
+	if !d.lastInject.IsZero() && time.Since(d.lastInject) < 3*time.Second {
+		d.mu.Unlock()
+		return
+	}
+	d.lastInject = time.Now()
+	d.mu.Unlock()
 	// Refresh the underlay answer first: a network change is exactly when the
 	// interface carrying traffic moves, and the report that follows should name
 	// the new one rather than wait for the next probe.

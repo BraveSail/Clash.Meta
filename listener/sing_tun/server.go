@@ -17,6 +17,7 @@ import (
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface"
+	"github.com/metacubex/mihomo/component/peerdirectory"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -65,7 +66,7 @@ type Listener struct {
 	routeAddressSet          []*netipx.IPSet
 	routeExcludeAddressSet   []*netipx.IPSet
 
-	systemDNSCancel          context.CancelFunc
+	systemDNSCancel context.CancelFunc
 
 	dnsServerIp []string
 }
@@ -368,6 +369,11 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 			}
 			iface.FlushCache()
 			resolver.ResetConnection() // reset resolver's connection after default interface changed
+			// The interfaces behind every connection just changed, which is the
+			// moment a directory that publishes this node's address is wrong.
+			// The platform's own notification is what says so - a route or
+			// interface callback, not a poll - so the report goes out now.
+			peerdirectory.InjectNetworkChange()
 		})
 		err = defaultInterfaceMonitor.Start()
 		if err != nil {
