@@ -452,22 +452,26 @@ type RawConfig struct {
 
 	ProxyProvider map[string]map[string]any `yaml:"proxy-providers" json:"proxy-providers"`
 	RuleProvider  map[string]map[string]any `yaml:"rule-providers" json:"rule-providers"`
-	Proxy         []map[string]any          `yaml:"proxies" json:"proxies"`
-	ProxyGroup    []map[string]any          `yaml:"proxy-groups" json:"proxy-groups"`
-	Rule          []string                  `yaml:"rules" json:"rule"`
-	SubRules      map[string][]string       `yaml:"sub-rules" json:"sub-rules"`
-	Listeners     []map[string]any          `yaml:"listeners" json:"listeners"`
-	Hosts         map[string]any            `yaml:"hosts" json:"hosts"`
-	DNS           RawDNS                    `yaml:"dns" json:"dns"`
-	NTP           RawNTP                    `yaml:"ntp" json:"ntp"`
-	Tun           RawTun                    `yaml:"tun" json:"tun"`
-	TuicServer    RawTuicServer             `yaml:"tuic-server" json:"tuic-server"`
-	IPTables      RawIPTables               `yaml:"iptables" json:"iptables"`
-	Experimental  RawExperimental           `yaml:"experimental" json:"experimental"`
-	Profile       RawProfile                `yaml:"profile" json:"profile"`
-	GeoXUrl       RawGeoXUrl                `yaml:"geox-url" json:"geox-url"`
-	Sniffer       RawSniffer                `yaml:"sniffer" json:"sniffer"`
-	TLS           RawTLS                    `yaml:"tls" json:"tls"`
+	// Mesh is the shared half of a set of peer-directory devices: it expands to
+	// one tailnet-peer outbound per device (see mesh.go), so `proxies` keeps
+	// holding only what a profile defines by hand.
+	Mesh         *RawMesh            `yaml:"mesh,omitempty" json:"mesh,omitempty"`
+	Proxy        []map[string]any    `yaml:"proxies" json:"proxies"`
+	ProxyGroup   []map[string]any    `yaml:"proxy-groups" json:"proxy-groups"`
+	Rule         []string            `yaml:"rules" json:"rule"`
+	SubRules     map[string][]string `yaml:"sub-rules" json:"sub-rules"`
+	Listeners    []map[string]any    `yaml:"listeners" json:"listeners"`
+	Hosts        map[string]any      `yaml:"hosts" json:"hosts"`
+	DNS          RawDNS              `yaml:"dns" json:"dns"`
+	NTP          RawNTP              `yaml:"ntp" json:"ntp"`
+	Tun          RawTun              `yaml:"tun" json:"tun"`
+	TuicServer   RawTuicServer       `yaml:"tuic-server" json:"tuic-server"`
+	IPTables     RawIPTables         `yaml:"iptables" json:"iptables"`
+	Experimental RawExperimental     `yaml:"experimental" json:"experimental"`
+	Profile      RawProfile          `yaml:"profile" json:"profile"`
+	GeoXUrl      RawGeoXUrl          `yaml:"geox-url" json:"geox-url"`
+	Sniffer      RawSniffer          `yaml:"sniffer" json:"sniffer"`
+	TLS          RawTLS              `yaml:"tls" json:"tls"`
 
 	ClashForAndroid RawClashForAndroid `yaml:"clash-for-android" json:"clash-for-android"`
 }
@@ -626,6 +630,12 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	config := &Config{}
 	log.Infoln("Start initial configuration in progress") //Segment finished in xxm
 	startTime := time.Now()
+
+	// The mesh block stands for per-device outbounds; expand it before anything
+	// reads the proxy list, so the rest of the parse sees ordinary entries.
+	if err := expandMesh(rawCfg); err != nil {
+		return nil, err
+	}
 
 	general, err := parseGeneral(rawCfg)
 	if err != nil {

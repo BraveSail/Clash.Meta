@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -357,6 +358,10 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 	payload := map[string]any{
 		"id":   d.option.ID,
 		"port": d.option.Port,
+		// The platform travels with the report so the directory can show what
+		// kind of machine each name is: the profile is shared, so nothing in it
+		// says whether a name is this phone or that desktop.
+		"platform": runtime.GOOS,
 	}
 	if addr != "" {
 		payload["addr"] = addr
