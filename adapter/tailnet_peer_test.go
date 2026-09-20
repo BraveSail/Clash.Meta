@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,15 +16,15 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 )
 
-func TestDirectoryIDPrefersTheDeviceSettingOverThePlatformMap(t *testing.T) {
-	platform := map[string]string{"windows": "pc", "android": "gt7", "linux": "linux-box"}
-	option := TailnetPeerOption{DirectoryIDByPlatform: platform}
-	if got := option.directoryID(); got != platform[runtime.GOOS] {
-		t.Fatalf("directoryID() = %q, want this platform's name", got)
+func TestDirectoryIDIsWhateverTheAppComputed(t *testing.T) {
+	option := TailnetPeerOption{DirectoryID: "a3f8b2c91d04"}
+	if got := option.directoryID(); got != "a3f8b2c91d04" {
+		t.Fatalf("directoryID() = %q, want the id the app computed", got)
 	}
-	option.DirectoryID = "explicit"
-	if got := option.directoryID(); got != "explicit" {
-		t.Fatalf("directoryID() = %q, want the explicit override", got)
+	// A profile that never got the id carries none: the outbound warns rather
+	// than inventing one.
+	if got := (TailnetPeerOption{}).directoryID(); got != "" {
+		t.Fatalf("directoryID() = %q, want empty without the app's id", got)
 	}
 }
 
@@ -175,15 +174,14 @@ func TestTailnetPeerWithoutADirectoryNameFails(t *testing.T) {
 	server := stub.serve()
 	t.Cleanup(server.Close)
 
-	// directory-id-by-platform names a different platform, so this device has
-	// no name: the outbound refuses instead of resolving somewhere else.
+	// No id computed, so this device has no name: the outbound refuses instead
+	// of resolving somewhere else.
 	peer := newTestPeer(t, TailnetPeerOption{
-		Name:                  "gt7",
-		Peer:                  "gt7",
-		Port:                  23333,
-		Proxy:                 map[string]any{"type": "direct", "name": "inner"},
-		DirectoryURL:          server.URL,
-		DirectoryIDByPlatform: map[string]string{"plan9": "gt7"},
+		Name:         "gt7",
+		Peer:         "gt7",
+		Port:         23333,
+		Proxy:        map[string]any{"type": "direct", "name": "inner"},
+		DirectoryURL: server.URL,
 	})
 	if _, _, err := peer.resolve(context.Background()); err == nil {
 		t.Fatal("a device without a directory name resolved a peer")

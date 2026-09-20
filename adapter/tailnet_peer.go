@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,12 +33,10 @@ type TailnetPeerOption struct {
 	// before every device is updated.
 	DirectoryURL   string `proxy:"directory-url,omitempty"`
 	DirectoryToken string `proxy:"directory-token,omitempty"`
-	DirectoryID    string `proxy:"directory-id,omitempty"`
-	// DirectoryIDByPlatform names this node per platform (the runtime.GOOS
-	// names: windows, android, linux, darwin), so a shared profile can tell each
-	// device who it is without any per-device setting. DirectoryID, which the app
-	// fills from its own setting, wins when both are present.
-	DirectoryIDByPlatform map[string]string `proxy:"directory-id-by-platform,omitempty"`
+	// DirectoryID is the id this device reports under. One profile runs on
+	// every device, so the app computes it per device from what the machine
+	// itself carries.
+	DirectoryID string `proxy:"directory-id,omitempty"`
 	// DirectoryPeer is the name to ask the directory for; it defaults to [Peer],
 	// which may be an address the directory does not know.
 	DirectoryPeer string `proxy:"directory-peer,omitempty"`
@@ -50,13 +47,10 @@ type TailnetPeerOption struct {
 	Proxy     map[string]any `proxy:"proxy"`
 }
 
-// directoryID is the name this node reports under: the app's own setting when it
-// is present, otherwise the profile's per-platform entry.
+// directoryID is the id this node reports under; it is empty when the app has
+// not computed one yet.
 func (o TailnetPeerOption) directoryID() string {
-	if o.DirectoryID != "" {
-		return o.DirectoryID
-	}
-	return o.DirectoryIDByPlatform[runtime.GOOS]
+	return o.DirectoryID
 }
 
 type TailnetPeer struct {
@@ -103,7 +97,7 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 	if option.directoryID() == "" {
 		// The profile asks for the directory but this device was never told
 		// which node it is: say so instead of quietly resolving somewhere else.
-		log.Warnln("tailnet-peer: %s configures a directory but this device has no name for it", option.Name)
+		log.Warnln("tailnet-peer: %s configures a directory but this device has no id for it", option.Name)
 	} else {
 		directory, err := acquireDirectoryClient(outbound.PeerDirectoryOption{
 			Name:      option.Name + " directory",
@@ -260,7 +254,7 @@ func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err 
 
 	if t.option.DirectoryURL != "" {
 		return "", false, fmt.Errorf(
-			"tailnet-peer: %s is configured for the peer directory but this device has no directory name; set one in the app",
+			"tailnet-peer: %s is configured for the peer directory but this device has not computed its id yet",
 			t.option.Name,
 		)
 	}

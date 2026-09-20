@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"regexp"
 	"runtime"
 	"sort"
@@ -166,7 +167,10 @@ func (d *PeerDirectory) MarshalJSON() ([]byte, error) {
 
 // PeerAddress answers where [id] is: this node answers for itself without a
 // request, everyone else comes from the directory with a short cache so a burst
-// of connections shares one lookup.
+// of connections shares one lookup. A directory that resolves this name to a
+// record carrying this node's own id has answered with this node - that is how
+// a profile addresses a device by the alias the dashboard gave it and is still
+// handed back to itself.
 func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int, bool, error) {
 	if id == d.option.ID {
 		return "", d.option.Port, true, nil
@@ -177,7 +181,7 @@ func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int
 	if ok && time.Since(cached.at) < peerDirectoryLookupTTL {
 		return cached.addr, cached.port, cached.self, nil
 	}
-	addr, port, err := d.lookup(ctx, id)
+	addr, port, nodeID, err := d.lookup(ctx, id)
 	if err != nil {
 		if ok {
 			// The directory is unreachable or the record expired: an address we
@@ -188,16 +192,22 @@ func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int
 		}
 		return "", 0, false, err
 	}
+	self := nodeID != "" && nodeID == d.option.ID
 	d.mu.Lock()
-	d.peers[id] = cachedPeer{addr: addr, port: port, at: time.Now()}
+	d.peers[id] = cachedPeer{addr: addr, port: port, self: self, at: time.Now()}
 	d.mu.Unlock()
+	if self {
+		// The directory resolved this name to this node: the service the name
+		// reaches is the one this node serves.
+		return "", d.option.Port, true, nil
+	}
 	return addr, port, false, nil
 }
 
-func (d *PeerDirectory) lookup(ctx context.Context, id string) (string, int, error) {
+func (d *PeerDirectory) lookup(ctx context.Context, id string) (string, int, string, error) {
 	target, err := url.Parse(d.option.URL)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	target.Path = strings.TrimSuffix(target.Path, "/") + "/lookup"
 	query := target.Query()
@@ -206,38 +216,39 @@ func (d *PeerDirectory) lookup(ctx context.Context, id string) (string, int, err
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	d.authorize(request)
 	response, err := d.client.Do(request)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<16))
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	if response.StatusCode == http.StatusNotFound {
-		return "", 0, fmt.Errorf("peer %q is unknown or expired", id)
+		return "", 0, "", fmt.Errorf("peer %q is unknown or expired", id)
 	}
 	if response.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("directory answered %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return "", 0, "", fmt.Errorf("directory answered %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var payload struct {
 		Nodes map[string]struct {
+			ID   string `json:"id"`
 			Addr string `json:"addr"`
 			Port int    `json:"port"`
 		} `json:"nodes"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	node, ok := payload.Nodes[id]
 	if !ok || node.Addr == "" {
-		return "", 0, fmt.Errorf("peer %q is unknown or expired", id)
+		return "", 0, "", fmt.Errorf("peer %q is unknown or expired", id)
 	}
-	return node.Addr, node.Port, nil
+	return node.Addr, node.Port, node.ID, nil
 }
 
 // run reports this node now and then on a jittered cadence: the directory
@@ -362,6 +373,11 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 		// kind of machine each name is: the profile is shared, so nothing in it
 		// says whether a name is this phone or that desktop.
 		"platform": runtime.GOOS,
+	}
+	// The host name travels too: an id is a digest, and a digest is not what a
+	// reader recognises a machine by until they name it themselves.
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		payload["hostname"] = hostname
 	}
 	if addr != "" {
 		payload["addr"] = addr

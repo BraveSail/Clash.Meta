@@ -15,11 +15,14 @@ import (
 )
 
 type directoryStub struct {
-	reports  atomic.Int64
-	lookups  atomic.Int64
-	fail     atomic.Bool
-	lastEtag atomic.Value
-	lastBody atomic.Value
+	reports atomic.Int64
+	lookups atomic.Int64
+	fail    atomic.Bool
+	// selfAlias makes the stub answer a peer name with this node's own id:
+	// that is how the directory resolves an alias back to the device asking.
+	selfAlias atomic.Bool
+	lastEtag  atomic.Value
+	lastBody  atomic.Value
 }
 
 func newDirectoryStub(t *testing.T, addr string) (*directoryStub, *httptest.Server) {
@@ -60,8 +63,12 @@ func newDirectoryStub(t *testing.T, addr string) (*directoryStub, *httptest.Serv
 				writer.WriteHeader(http.StatusNotFound)
 				return
 			}
+			nodeID := "gt7"
+			if stub.selfAlias.Load() {
+				nodeID = "pc"
+			}
 			_ = json.NewEncoder(writer).Encode(map[string]any{
-				"nodes": map[string]any{"gt7": map[string]any{"addr": "2409:895a::1", "port": 8443}},
+				"nodes": map[string]any{"gt7": map[string]any{"id": nodeID, "addr": "2409:895a::1", "port": 8443}},
 			})
 		default:
 			writer.WriteHeader(http.StatusNotFound)
@@ -187,8 +194,32 @@ func TestPeerDirectoryLooksUpPeersAndAnswersForItself(t *testing.T) {
 	}
 }
 
-// A directory that reports which nodes are up needs a heartbeat: the address
-// did not move, but the node is still there.
+// An alias set on the dashboard names a device, and the directory answers a
+// lookup of it with that device's record: the id in the answer is what lets a
+// client recognise itself behind a name it never configured.
+func TestPeerDirectoryResolvesAnAliasBackToItself(t *testing.T) {
+	stub, server := newDirectoryStub(t, "2409:8a55::1")
+	directory := newTestDirectory(t, server.URL)
+	ctx := context.Background()
+
+	// The directory resolves the name to this node's own record - the way an
+	// alias set on the dashboard does - and the answer is this node.
+	stub.selfAlias.Store(true)
+	addr, port, self, err := directory.PeerAddress(ctx, "gt7")
+	if err != nil || !self || addr != "" || port != 8443 {
+		t.Fatalf("PeerAddress(alias of self) = %q %d self=%v err=%v", addr, port, self, err)
+	}
+
+	// The same name after the alias is gone is another machine again; the
+	// cache is short, so wait it out.
+	time.Sleep(peerDirectoryLookupTTL)
+	stub.selfAlias.Store(false)
+	addr, port, self, err = directory.PeerAddress(ctx, "gt7")
+	if err != nil || self || addr != "2409:895a::1" || port != 8443 {
+		t.Fatalf("PeerAddress(gt7) = %q %d self=%v err=%v", addr, port, self, err)
+	}
+}
+
 // A route change arrives as a burst - the platform reports every route the
 // change touches - and the directory is asked once, not once per event.
 func TestNetworkChangeCoalescesARouteBurst(t *testing.T) {
@@ -224,6 +255,8 @@ func TestNetworkChangeCoalescesARouteBurst(t *testing.T) {
 	}
 }
 
+// A directory that reports which nodes are up needs a heartbeat: the address
+// did not move, but the node is still there.
 func TestPeerDirectoryHeartbeatsWhenTheAddressIsUnchanged(t *testing.T) {
 	stub, server := newDirectoryStub(t, "2409:8a55::1")
 	directory := newTestDirectory(t, server.URL)
