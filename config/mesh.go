@@ -43,6 +43,12 @@ var discoverMeshNodes = outbound.FetchDirectoryNodes
 // reached by.
 var meshDeviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,63}$`)
 
+// meshDomainPattern is what a device's mesh domain may be: a lower-case DNS
+// name a rule can carry, e.g. "pc.lan". It is matched exactly in a rule, so
+// the pattern is the DNS one rather than the id one - a domain is looked up at
+// connection time and a name spelled two ways must not become two devices.
+var meshDomainPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+
 // RawMeshDevice is one device of a mesh: the name it is reached by and the
 // port its service listens on. Nothing here names the device the profile runs
 // on: the core reports under an id it carries, and the directory maps that id
@@ -55,6 +61,12 @@ type RawMeshDevice struct {
 	// renamed on the dashboard still resolves to the same machine. Empty for
 	// a device written down by hand.
 	ID string `yaml:"id,omitempty" json:"id,omitempty"`
+	// Domain is the name a connection uses to reach this device, e.g.
+	// "pc.lan". The core writes one rule per domain pointing at the mesh
+	// entry, so a profile names no device at all and renaming one on the
+	// dashboard cannot break a shared configuration. Empty for a device that
+	// is only reachable by its own outbound.
+	Domain string `yaml:"domain,omitempty" json:"domain,omitempty"`
 	// Port is the port this device serves on and is dialled at. Every device
 	// takes the same value - a device reports one port to the directory - so
 	// writing it on the entries that differ from the default is enough.
@@ -108,7 +120,19 @@ type meshPeer struct {
 	// device the block lists by hand, where the name is all there is.
 	ID   string
 	Port int
+	// Domain is the name a connection uses to reach this device, when one was
+	// chosen for it. The mesh entry holds the mapping from these to their
+	// records, which is how a rule can point at the mesh alone.
+	Domain string
 }
+
+// meshEntryName is the name of the single outbound every mesh rule points at.
+// A profile therefore names no device: the rule says "this name goes to the
+// mesh" and the entry decides which device serves it from the domain the
+// connection asked for. Writing a name that cannot collide with a device's own
+// name is the point - a device renamed on the dashboard cannot break a profile
+// that never spelled it.
+const meshEntryName = "mesh"
 
 // expandMesh turns the mesh block into the listener this device serves and one
 // tailnet-peer outbound per device, and appends them to the listener and proxy
@@ -184,6 +208,24 @@ func expandMesh(rawCfg *RawConfig) error {
 		}
 		rawCfg.Proxy = append(rawCfg.Proxy, mapping)
 	}
+
+	// One entry the domain rules point at, holding the mapping from the name a
+	// connection asked for to the device that serves it. Without it every rule
+	// would have to name a device, and a device renamed on the dashboard would
+	// leave the profile pointing at nothing.
+	domains := make(map[string]string, len(peers))
+	for _, peer := range peers {
+		if peer.Domain == "" || peer.ID == "" {
+			continue
+		}
+		domains[peer.Domain] = peer.ID
+	}
+	if len(domains) > 0 {
+		rawCfg.Proxy = append(rawCfg.Proxy, buildMeshEntry(mesh, domains))
+		// The rules go first so a domain the user also wrote by hand - a
+		// geosite entry, a catch-all - cannot shadow the mesh.
+		rawCfg.Rule = append(buildMeshDomainRules(domains), rawCfg.Rule...)
+	}
 	if mesh.DirectoryResolved && len(mesh.Devices) == 0 {
 		log.Warnln("[Mesh] the app resolved no device from the directory %s; the profile's rules will not find one", mesh.DirectoryURL)
 	}
@@ -197,7 +239,54 @@ func expandMesh(rawCfg *RawConfig) error {
 	default:
 		log.Infoln("[Mesh] %d device(s) expanded into tailnet-peer outbounds", len(peers))
 	}
+	if len(domains) > 0 {
+		log.Infoln("[Mesh] %d domain(s) added; rules for them point at %q", len(domains), meshEntryName)
+	}
 	return nil
+}
+
+// buildMeshEntry is the outbound a profile's mesh rules point at: it answers
+// whichever device the requested name belongs to, so one rule covers every
+// device and no device has to be named in the profile.
+func buildMeshEntry(mesh *RawMesh, domains map[string]string) map[string]any {
+	mapping := map[string]any{
+		"name":          meshEntryName,
+		"type":          "tailnet-peer",
+		"port":          meshDefaultPort,
+		"directory-url": mesh.DirectoryURL,
+		"proxy":         mesh.Proxy,
+		"domains":       domains,
+	}
+	if mesh.DirectoryToken != "" {
+		mapping["directory-token"] = mesh.DirectoryToken
+	}
+	if mesh.DirectoryID != "" {
+		mapping["directory-id"] = mesh.DirectoryID
+	}
+	if mesh.Heartbeat > 0 {
+		mapping["heartbeat"] = mesh.Heartbeat
+	}
+	if mesh.DirectoryProxy != "" {
+		mapping["directory-proxy"] = mesh.DirectoryProxy
+	}
+	return mapping
+}
+
+// buildMeshDomainRules is one rule per domain, pointing at the mesh entry. The
+// name is matched exactly rather than by suffix: a rule written by hand for the
+// same suffix must keep working, and a device is reached by the name it was
+// given, not by everything that ends the same way.
+func buildMeshDomainRules(domains map[string]string) []string {
+	names := make([]string, 0, len(domains))
+	for domain := range domains {
+		names = append(names, domain)
+	}
+	sort.Strings(names)
+	rules := make([]string, 0, len(names))
+	for _, domain := range names {
+		rules = append(rules, "DOMAIN,"+domain+","+meshEntryName)
+	}
+	return rules
 }
 
 // meshDiscoveryConfigured says whether a mesh that lists no device takes its
@@ -302,7 +391,16 @@ func meshPeers(mesh *RawMesh, port int) (peers []meshPeer, discovered bool, err 
 			if id != "" && !meshDeviceNamePattern.MatchString(id) {
 				return nil, false, fmt.Errorf("mesh device %d: id %q is not a valid directory id (letters, digits, . _ -, up to 63)", index, device.ID)
 			}
-			peers = append(peers, meshPeer{Name: name, ID: id, Port: port})
+			domain := strings.ToLower(strings.TrimSpace(device.Domain))
+			if domain != "" && !meshDomainPattern.MatchString(domain) {
+				// A domain is set on the dashboard and only decides which
+				// device a name reaches: a bad one costs this device its
+				// domain rule, not the profile - refusing the configuration
+				// would take the whole mesh down over one odd record.
+				log.Warnln("[Mesh] device %q carries domain %q, which is not a dns name; it will not be reached by that name", name, device.Domain)
+				domain = ""
+			}
+			peers = append(peers, meshPeer{Name: name, ID: id, Port: port, Domain: domain})
 		}
 		return peers, false, nil
 	}
@@ -360,7 +458,14 @@ func discoverMeshPeers(mesh *RawMesh) ([]meshPeer, error) {
 		if port < 1 || port > 65535 {
 			port = meshDefaultPort
 		}
-		peers = append(peers, meshPeer{Name: name, ID: node.ID, Port: port})
+		domain := strings.ToLower(strings.TrimSpace(node.Domain))
+		if domain != "" && !meshDomainPattern.MatchString(domain) {
+			// Same as a device written in the profile: an odd domain costs
+			// the device its name, not the whole mesh.
+			log.Warnln("[Mesh] device %q carries domain %q, which is not a dns name; it will not be reached by that name", name, node.Domain)
+			domain = ""
+		}
+		peers = append(peers, meshPeer{Name: name, ID: node.ID, Port: port, Domain: domain})
 	}
 	if len(peers) == 0 {
 		log.Warnln("[Mesh] the directory %s holds no device yet; the profile's rules will not find one", mesh.DirectoryURL)

@@ -676,3 +676,92 @@ func TestExpandMeshRejectsAnInvalidResolvedID(t *testing.T) {
 	rawCfg.Mesh.DirectoryResolved = true
 	assert.Error(t, expandMesh(rawCfg))
 }
+
+// A mesh whose devices carry domains grows one entry the rules point at, and
+// the rules for the domains point at it: the profile writes no rule per device,
+// so a device renamed on the dashboard cannot leave a rule pointing at nothing.
+func TestExpandMeshWritesAnEntryAndRulesForTheDevicesDomains(t *testing.T) {
+	stubDiscovery(t, nil, errors.New("the directory must not be read during the parse"))
+
+	rawCfg := discoveredMesh([]RawMeshDevice{
+		{Name: "PC", ID: "a1b2c3d4e5f6", Domain: "pc.lan"},
+		{Name: "gt7", ID: "0f1e2d3c4b5a", Domain: "GT7.LAN"},
+		{Name: "phone", ID: "112233445566"},
+	})
+	rawCfg.Mesh.DirectoryResolved = true
+
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// One entry for every device, plus the one the rules point at.
+	if len(rawCfg.Proxy) != 4 {
+		t.Fatalf("expanded %d proxies, want one per device plus the mesh entry", len(rawCfg.Proxy))
+	}
+	entry := rawCfg.Proxy[3]
+	assert.Equal(t, meshEntryName, entry["name"])
+	assert.Equal(t, "tailnet-peer", entry["type"])
+	// The mapping is what makes one entry serve every device: the name a
+	// connection asked for decides which record is looked up.
+	assert.Equal(t, map[string]string{"pc.lan": "a1b2c3d4e5f6", "gt7.lan": "0f1e2d3c4b5a"}, entry["domains"])
+	assert.Equal(t, meshDefaultPort, entry["port"])
+
+	// Sorted, so the rules read the same on every device of the mesh.
+	assert.Equal(t, []string{"DOMAIN,gt7.lan,mesh", "DOMAIN,pc.lan,mesh"}, rawCfg.Rule)
+	// The device without a domain is still dialled by name; only its domain
+	// rule is missing.
+	assert.Equal(t, "phone", rawCfg.Proxy[2]["name"])
+}
+
+// The generated rules go first: a rule the user wrote by hand for the same
+// name - a catch-all, a geosite entry - must not shadow the mesh.
+func TestExpandMeshPutsTheDomainRulesFirst(t *testing.T) {
+	stubDiscovery(t, nil, errors.New("the directory must not be read during the parse"))
+
+	rawCfg := discoveredMesh([]RawMeshDevice{{Name: "PC", ID: "a1b2c3d4e5f6", Domain: "pc.lan"}})
+	rawCfg.Mesh.DirectoryResolved = true
+	rawCfg.Rule = []string{"MATCH,DIRECT"}
+
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, []string{"DOMAIN,pc.lan,mesh", "MATCH,DIRECT"}, rawCfg.Rule)
+}
+
+// A device without a domain grows neither an entry nor a rule: an old profile
+// that names its devices keeps expanding exactly as it did.
+func TestExpandMeshWritesNothingForDevicesWithoutDomains(t *testing.T) {
+	stubDiscovery(t, nil, errors.New("the directory must not be read during the parse"))
+
+	rawCfg := discoveredMesh([]RawMeshDevice{{Name: "PC", ID: "a1b2c3d4e5f6"}})
+	rawCfg.Mesh.DirectoryResolved = true
+
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawCfg.Proxy) != 1 {
+		t.Fatalf("expanded %d proxies, want only the device", len(rawCfg.Proxy))
+	}
+	assert.Empty(t, rawCfg.Rule)
+}
+
+// A domain is set on the dashboard and only decides which device a name
+// reaches: one that is not a dns name costs the device its domain, not the
+// profile - refusing the configuration would take the whole mesh down over one
+// odd record.
+func TestExpandMeshDropsAnInvalidDomainRatherThanTheProfile(t *testing.T) {
+	stubDiscovery(t, nil, errors.New("the directory must not be read during the parse"))
+
+	rawCfg := discoveredMesh([]RawMeshDevice{
+		{Name: "PC", ID: "a1b2c3d4e5f6", Domain: "not a domain"},
+		{Name: "gt7", ID: "0f1e2d3c4b5a", Domain: "gt7.lan"},
+	})
+	rawCfg.Mesh.DirectoryResolved = true
+
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatalf("an odd domain failed the parse: %v", err)
+	}
+	// The device stays; only its rule is gone.
+	assert.Equal(t, []string{"DOMAIN,gt7.lan,mesh"}, rawCfg.Rule)
+	assert.Equal(t, map[string]string{"gt7.lan": "0f1e2d3c4b5a"}, rawCfg.Proxy[len(rawCfg.Proxy)-1]["domains"])
+}

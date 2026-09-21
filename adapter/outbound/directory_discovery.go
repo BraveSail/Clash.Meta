@@ -20,6 +20,9 @@ type DirectoryNode struct {
 	Name string
 	Addr string
 	Port int
+	// Domain is the name a connection uses to reach this device, when someone
+	// set one on the dashboard. The mesh resolves a requested name through it.
+	Domain string
 }
 
 // FetchDirectoryNodes asks the directory for every device it holds. A mesh is
@@ -66,6 +69,7 @@ func FetchDirectoryNodes(ctx context.Context, rawURL, token string, timeout time
 			Port     int    `json:"port"`
 			Hostname string `json:"hostname"`
 			Alias    string `json:"alias"`
+			Domain   string `json:"domain"`
 		} `json:"nodes"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -79,10 +83,11 @@ func FetchDirectoryNodes(ctx context.Context, rawURL, token string, timeout time
 			continue
 		}
 		nodes = append(nodes, DirectoryNode{
-			ID:   id,
-			Name: directoryNodeName(node.Alias, node.Hostname, id),
-			Addr: strings.TrimSpace(node.Addr),
-			Port: node.Port,
+			ID:     id,
+			Name:   directoryNodeName(node.Alias, node.Hostname, id),
+			Addr:   strings.TrimSpace(node.Addr),
+			Port:   node.Port,
+			Domain: strings.ToLower(strings.TrimSpace(node.Domain)),
 		})
 	}
 	return nodes, nil

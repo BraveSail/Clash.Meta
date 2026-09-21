@@ -120,7 +120,7 @@ func TestTailnetPeerResolvesThroughTheDirectory(t *testing.T) {
 		t.Fatalf("resolve = %q self=%v err=%v", host, self, err)
 	}
 
-	proxy, err := peer.proxyForDial(context.Background())
+	proxy, err := peer.proxyForDial(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestTailnetPeerDegradesToDirectForItself(t *testing.T) {
 	if err != nil || !self || host != "" {
 		t.Fatalf("resolve(self) = %q self=%v err=%v", host, self, err)
 	}
-	proxy, err := peer.proxyForDial(context.Background())
+	proxy, err := peer.proxyForDial(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}

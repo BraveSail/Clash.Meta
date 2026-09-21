@@ -25,7 +25,10 @@ const tailnetPeerResolveTTL = 2 * time.Second
 type TailnetPeerOption struct {
 	outbound.BasicOption
 	Name string `proxy:"name"`
-	Peer string `proxy:"peer"`
+	// Peer is the device this outbound dials. A mesh entry that answers by
+	// domain map alone has no single peer, so the field is optional here;
+	// NewTailnetPeer refuses an entry that has neither.
+	Peer string `proxy:"peer,omitempty"`
 	Port int    `proxy:"port"`
 	// DirectoryURL and DirectoryToken configure the directory this outbound
 	// asks, with DirectoryID naming this node in it. A build that predates
@@ -40,6 +43,13 @@ type TailnetPeerOption struct {
 	// DirectoryPeer is the name to ask the directory for; it defaults to [Peer],
 	// which may be an address the directory does not know.
 	DirectoryPeer string `proxy:"directory-peer,omitempty"`
+	// Domains maps a name a connection may ask for to the directory record
+	// that answers it, e.g. {"pc.lan": "a1b2c3d4e5f6"}. An entry configured
+	// with it serves whichever device the requested name belongs to, so a
+	// profile's rules can point at the mesh alone and no device has to be
+	// named in the profile; a name that is not in the map falls back to
+	// DirectoryPeer.
+	Domains map[string]string `proxy:"domains,omitempty"`
 	// DirectoryProxy is an HTTP proxy URL this outbound's directory requests
 	// go through, for a device whose network cannot reach the directory
 	// directly.
@@ -66,17 +76,29 @@ type TailnetPeer struct {
 	// was configured inline.
 	directory *outbound.PeerDirectory
 
-	mu         sync.Mutex
-	inner      C.Proxy
-	innerHost  string
-	cachedHost string
-	cachedSelf bool
-	resolvedAt time.Time
+	mu        sync.Mutex
+	inner     C.Proxy
+	innerHost string
+	// cachedPeers is one answer per directory record, not one per outbound: a
+	// mesh entry serves every device, so a single slot would answer every
+	// connection with whichever device it looked up first.
+	cachedPeers map[string]resolvedPeer
+}
+
+// resolvedPeer is where one directory record was last seen.
+type resolvedPeer struct {
+	host string
+	port int
+	self bool
+	at   time.Time
 }
 
 func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
-	if strings.TrimSpace(option.Peer) == "" {
-		return nil, errors.New("tailnet-peer: peer is required")
+	// A mesh entry is configured by its domain map alone: it has no single
+	// peer, because the name the connection asked for is what decides which
+	// device answers. An entry with neither has nothing to resolve.
+	if strings.TrimSpace(option.Peer) == "" && len(option.Domains) == 0 {
+		return nil, errors.New("tailnet-peer: peer is required unless domains maps the names it answers")
 	}
 	if option.Port <= 0 || option.Port > 65535 {
 		return nil, fmt.Errorf("tailnet-peer: invalid port %d", option.Port)
@@ -117,7 +139,7 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 		}
 		peer.directory = directory
 	}
-	inner, err := peer.buildInner("")
+	inner, err := peer.buildInner("", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -126,8 +148,11 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 }
 
 // buildInner re-parses the inner proxy configuration with the address this
-// node resolved; an empty host keeps a placeholder until the first dial.
-func (t *TailnetPeer) buildInner(host string) (C.Proxy, error) {
+// node resolved; an empty host keeps a placeholder until the first dial. The
+// port is the one the device's own record carries: a mesh entry serves devices
+// that listen on whatever port each of them reports, so the entry's own port is
+// not the port to dial.
+func (t *TailnetPeer) buildInner(host string, port int) (C.Proxy, error) {
 	mapping := make(map[string]any, len(t.option.Proxy)+4)
 	for key, value := range t.option.Proxy {
 		mapping[key] = value
@@ -135,8 +160,11 @@ func (t *TailnetPeer) buildInner(host string) (C.Proxy, error) {
 	if host == "" {
 		host = "0.0.0.0"
 	}
+	if port <= 0 || port > 65535 {
+		port = t.option.Port
+	}
 	mapping["server"] = host
-	mapping["port"] = t.option.Port
+	mapping["port"] = port
 	if _, ok := mapping["name"]; !ok {
 		mapping["name"] = t.option.Name + " (inner)"
 	}
@@ -144,7 +172,7 @@ func (t *TailnetPeer) buildInner(host string) (C.Proxy, error) {
 }
 
 func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
-	if _, self, err := t.resolve(ctx); err != nil {
+	if _, _, self, err := t.resolveFor(ctx, requestedHost(metadata)); err != nil {
 		return nil, err
 	} else if self {
 		if conn, err := t.dialLocalService(ctx, metadata); err == nil {
@@ -153,7 +181,7 @@ func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.
 		return t.direct.DialContext(ctx, metadata)
 	}
 
-	proxy, err := t.proxyForDial(ctx)
+	proxy, err := t.proxyForDial(ctx, requestedHost(metadata))
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +190,32 @@ func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.
 		t.invalidate()
 	}
 	return conn, err
+}
+
+// requestedHost is the name a connection asked for, lower case, or empty when
+// it has none (an IP, or a connection that never carried a name). It is what a
+// mesh entry maps to a device: the rule chose the entry, and the name the
+// caller used is what decides which device serves it.
+func requestedHost(metadata *C.Metadata) string {
+	if metadata == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(metadata.Host))
+}
+
+// recordKey is the directory record this connection should be resolved
+// through: the device that claimed the requested name, when the entry was
+// given a mapping for it, and the configured peer otherwise. A name the map
+// does not know is not an error - a profile may address a device by its own
+// name, and only names someone mapped are guaranteed to be there.
+func (t *TailnetPeer) recordKey(host string) string {
+	if host == "" || len(t.option.Domains) == 0 {
+		return t.directoryNameKey()
+	}
+	if id, ok := t.option.Domains[host]; ok && id != "" {
+		return id
+	}
+	return t.directoryNameKey()
 }
 
 // dialLocalService reaches a service that runs on this node. The destination of
@@ -187,7 +241,7 @@ func (t *TailnetPeer) dialLocalService(ctx context.Context, metadata *C.Metadata
 }
 
 func (t *TailnetPeer) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
-	proxy, err := t.proxyForDial(ctx)
+	proxy, err := t.proxyForDial(ctx, requestedHost(metadata))
 	if err != nil {
 		return nil, err
 	}
@@ -199,10 +253,10 @@ func (t *TailnetPeer) ListenPacketContext(ctx context.Context, metadata *C.Metad
 }
 
 // proxyForDial returns the proxy to use for one connection: DIRECT when the
-// configured peer is this node, otherwise the inner proxy bound to the peer's
-// current address.
-func (t *TailnetPeer) proxyForDial(ctx context.Context) (C.Proxy, error) {
-	host, self, err := t.resolve(ctx)
+// resolved device is this node, otherwise the inner proxy bound to that
+// device's current address, dialled at the port its own record carries.
+func (t *TailnetPeer) proxyForDial(ctx context.Context, host string) (C.Proxy, error) {
+	resolved, port, self, err := t.resolveFor(ctx, host)
 	if err != nil {
 		return nil, err
 	}
@@ -211,16 +265,16 @@ func (t *TailnetPeer) proxyForDial(ctx context.Context) (C.Proxy, error) {
 	if self {
 		return t.direct, nil
 	}
-	if host == t.innerHost && t.inner != nil {
+	if resolved == t.innerHost && t.inner != nil {
 		return t.inner, nil
 	}
-	inner, err := t.buildInner(host)
+	inner, err := t.buildInner(resolved, port)
 	if err != nil {
 		return nil, err
 	}
 	previous := t.inner
 	t.inner = inner
-	t.innerHost = host
+	t.innerHost = resolved
 	if previous != nil {
 		_ = previous.Close()
 	}
@@ -235,50 +289,67 @@ func (t *TailnetPeer) directoryNameKey() string {
 	return t.option.Peer
 }
 
+// resolve answers where the configured peer is. It is the form used when a
+// caller has no name to resolve by (the mesh entry resolves per connection).
 func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err error) {
+	host, _, self, err = t.resolveFor(ctx, "")
+	return host, self, err
+}
+
+// resolveFor answers where the device for [host] is, falling back to the
+// configured peer when the name is not one this entry was given. The answer is
+// cached per record, because one mesh entry serves every device: a cache keyed
+// by the entry alone would hand every connection the first device it looked up.
+// The port is the device's own: a record carries the port its service listens
+// on, and that is what a name is dialled at.
+func (t *TailnetPeer) resolveFor(ctx context.Context, host string) (resolved string, port int, self bool, err error) {
+	key := t.recordKey(host)
 	t.mu.Lock()
-	if (t.cachedHost != "" || t.cachedSelf) && time.Since(t.resolvedAt) < tailnetPeerResolveTTL {
-		host, self = t.cachedHost, t.cachedSelf
+	if cached, ok := t.cachedPeers[key]; ok && time.Since(cached.at) < tailnetPeerResolveTTL {
+		resolved, port, self = cached.host, cached.port, cached.self
 		t.mu.Unlock()
-		return host, self, nil
+		return resolved, port, self, nil
 	}
 	t.mu.Unlock()
 
 	if t.directory != nil {
-		addr, _, self, err := t.directory.PeerAddress(ctx, t.directoryNameKey())
+		addr, addrPort, isSelf, err := t.directory.PeerAddress(ctx, key)
 		if err != nil {
-			return "", false, fmt.Errorf("tailnet-peer: %w", err)
+			return "", 0, false, fmt.Errorf("tailnet-peer: %w", err)
 		}
-		if self {
-			t.storeResolved("", true)
-			return "", true, nil
+		if isSelf {
+			t.storeResolved(key, "", 0, true)
+			return "", 0, true, nil
 		}
-		t.storeResolved(addr, false)
-		return addr, false, nil
+		t.storeResolved(key, addr, addrPort, false)
+		return addr, addrPort, false, nil
 	}
 
 	if t.option.DirectoryURL != "" {
-		return "", false, fmt.Errorf(
+		return "", 0, false, fmt.Errorf(
 			"tailnet-peer: %s is configured for the peer directory but this device has not computed its id yet",
 			t.option.Name,
 		)
 	}
 
-	return "", false, fmt.Errorf("tailnet-peer: %s has no peer directory to ask", t.option.Name)
+	return "", 0, false, fmt.Errorf("tailnet-peer: %s has no peer directory to ask", t.option.Name)
 }
 
-func (t *TailnetPeer) storeResolved(host string, self bool) {
+func (t *TailnetPeer) storeResolved(key, host string, port int, self bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.cachedHost = host
-	t.cachedSelf = self
-	t.resolvedAt = time.Now()
+	if t.cachedPeers == nil {
+		t.cachedPeers = make(map[string]resolvedPeer)
+	}
+	t.cachedPeers[key] = resolvedPeer{host: host, port: port, self: self, at: time.Now()}
 }
 
+// invalidate forgets every resolved record, so the next dial asks the
+// directory again: a failed connection is the signal that an address moved.
 func (t *TailnetPeer) invalidate() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.resolvedAt = time.Time{}
+	t.cachedPeers = nil
 }
 
 func (t *TailnetPeer) innerProxy() C.Proxy {
