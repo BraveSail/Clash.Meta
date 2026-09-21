@@ -389,19 +389,25 @@ func TestExpandMeshExpandsDiscoveredDevicesInIDOrder(t *testing.T) {
 	}
 }
 
-// A directory that cannot be read is the reason the profile does not load:
-// rules naming a device would otherwise be left pointing at nothing.
-func TestExpandMeshFailsWhenTheDirectoryCannotBeRead(t *testing.T) {
+// A directory that cannot be read is the network's answer for now, not a
+// mistake in the profile: the same request succeeds the next time it is made.
+// Refusing here used to take the whole device down - no proxy, no direct
+// access - over one reset connection, which is exactly what a device on the
+// user's network hit at startup.
+func TestExpandMeshSurvivesAnUnreadableDirectory(t *testing.T) {
 	stubDiscovery(t, nil, errors.New("directory answered 401: unauthorized"))
 
 	rawCfg := discoveredMesh(nil)
-	err := expandMesh(rawCfg)
-	if err == nil {
-		t.Fatal("an unreachable directory was accepted")
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatalf("an unreachable directory failed the parse: %v", err)
 	}
-	assert.Contains(t, err.Error(), "https://hub.example")
-	if len(rawCfg.Proxy) != 0 || len(rawCfg.Listeners) != 0 {
-		t.Fatalf("a failed discovery still expanded %d proxies and %d listeners", len(rawCfg.Proxy), len(rawCfg.Listeners))
+	// No device is known, so there are no peer outbounds - but the listener
+	// this device serves still stands, and the profile loads.
+	if len(rawCfg.Proxy) != 0 {
+		t.Fatalf("a failed discovery still expanded %d proxies", len(rawCfg.Proxy))
+	}
+	if len(rawCfg.Listeners) != 1 {
+		t.Fatalf("a failed discovery expanded %d listeners, want the one this device serves", len(rawCfg.Listeners))
 	}
 }
 

@@ -412,7 +412,15 @@ func meshPeers(mesh *RawMesh, port int) (peers []meshPeer, discovered bool, err 
 	}
 	peers, err = discoverMeshPeers(mesh)
 	if err != nil {
-		return nil, true, err
+		// A directory that cannot be read is the network's answer for now,
+		// not a mistake in the profile: the same file loads a moment later
+		// when the reset stops happening. Refusing here took the whole
+		// device down - no proxy, no direct access - over one lost packet
+		// on a request the next start makes again. The mesh stays empty
+		// until a later expansion reads it, and the rules the core writes
+		// from the devices' domains are simply not there while it is.
+		log.Warnln("[Mesh] cannot read the devices from the directory %s: %v; expanding with no device this time", mesh.DirectoryURL, err)
+		return nil, true, nil
 	}
 	return peers, true, nil
 }
