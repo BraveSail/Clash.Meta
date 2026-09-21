@@ -1,17 +1,30 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 
+	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/log"
 )
 
 // meshDefaultPort is the port a device listens on - and is dialled at - when
 // its entry in the mesh does not name one.
 const meshDefaultPort = 8443
+
+// meshDiscoveryTimeout bounds the one request the mesh makes while the
+// configuration is parsed: a device that cannot reach the directory has to say
+// so rather than hang the start.
+const meshDiscoveryTimeout = 8 * time.Second
+
+// discoverMeshNodes reads the device list from the peer directory. It is a
+// variable so a test can describe the devices it wants the expansion to see.
+var discoverMeshNodes = outbound.FetchDirectoryNodes
 
 // meshDeviceNamePattern is what a device name may be: the agent resolves it
 // through the name that device was given, and it becomes a DNS label a peer is
@@ -48,17 +61,33 @@ type RawMesh struct {
 	// Proxy is the protocol this device dials a peer with, and Listener is
 	// the protocol a peer dials this device with: the same service seen from
 	// the two ends.
-	Proxy    map[string]any  `yaml:"proxy,omitempty" json:"proxy,omitempty"`
-	Listener map[string]any  `yaml:"listener,omitempty" json:"listener,omitempty"`
-	Devices  []RawMeshDevice `yaml:"devices" json:"devices"`
+	Proxy    map[string]any `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+	Listener map[string]any `yaml:"listener,omitempty" json:"listener,omitempty"`
+	// Devices lists the devices by hand. A mesh that lists none takes them
+	// from the directory instead: the directory is what knows every device
+	// that reported, so a profile running on all of them does not have to
+	// name them.
+	Devices []RawMeshDevice `yaml:"devices" json:"devices"`
+}
+
+// meshPeer is one device of a mesh as the expansion needs it: the name the
+// profile and its rules reach it by, and the id the directory knows it under,
+// which is what a lookup asks for.
+type meshPeer struct {
+	Name string
+	// ID is the directory record this peer resolves to; it is empty for a
+	// device the block lists by hand, where the name is all there is.
+	ID   string
+	Port int
 }
 
 // expandMesh turns the mesh block into the listener this device serves and one
-// tailnet-peer outbound per listed device, and appends them to the listener
-// and proxy lists.
+// tailnet-peer outbound per device, and appends them to the listener and proxy
+// lists. The devices are the ones the block lists, or - when it lists none -
+// the ones the directory holds, read while the configuration is parsed.
 func expandMesh(rawCfg *RawConfig) error {
 	mesh := rawCfg.Mesh
-	if mesh == nil || len(mesh.Devices) == 0 {
+	if mesh == nil || (len(mesh.Devices) == 0 && !meshDiscoveryConfigured(mesh)) {
 		return nil
 	}
 	if strings.TrimSpace(mesh.DirectoryURL) == "" {
@@ -67,19 +96,12 @@ func expandMesh(rawCfg *RawConfig) error {
 	if len(mesh.Proxy) == 0 {
 		return errors.New("mesh: proxy is required, the protocol this device dials a peer with")
 	}
-
-	seenName := make(map[string]bool, len(mesh.Devices))
-	for index, device := range mesh.Devices {
-		name := strings.TrimSpace(device.Name)
-		if !meshDeviceNamePattern.MatchString(name) {
-			return fmt.Errorf("mesh device %d: name %q is not a valid device name (letters, digits, . _ -, up to 63)", index, device.Name)
-		}
-		if seenName[name] {
-			return fmt.Errorf("mesh device %d: duplicate name %q", index, name)
-		}
-		seenName[name] = true
-	}
 	port, err := meshPort(mesh)
+	if err != nil {
+		return err
+	}
+
+	peers, discovered, err := meshPeers(mesh, port)
 	if err != nil {
 		return err
 	}
@@ -91,15 +113,20 @@ func expandMesh(rawCfg *RawConfig) error {
 		rawCfg.Listeners = append(rawCfg.Listeners, buildMeshListener(mesh.Listener, port))
 	}
 
-	for _, device := range mesh.Devices {
-		name := strings.TrimSpace(device.Name)
+	for _, peer := range peers {
 		mapping := map[string]any{
-			"name":          name,
+			"name":          peer.Name,
 			"type":          "tailnet-peer",
-			"peer":          name,
-			"port":          port,
+			"peer":          peer.Name,
+			"port":          peer.Port,
 			"directory-url": mesh.DirectoryURL,
 			"proxy":         mesh.Proxy,
+		}
+		if peer.ID != "" {
+			// The name is what the profile reads and its rules point at; the
+			// id is what the directory is asked for, so a device renamed on
+			// the dashboard still resolves to the same machine everywhere.
+			mapping["directory-peer"] = peer.ID
 		}
 		if mesh.DirectoryToken != "" {
 			mapping["directory-token"] = mesh.DirectoryToken
@@ -112,12 +139,102 @@ func expandMesh(rawCfg *RawConfig) error {
 		}
 		rawCfg.Proxy = append(rawCfg.Proxy, mapping)
 	}
-	if meshListenerDefined(mesh) {
-		log.Infoln("[Mesh] %d device(s) expanded; this device listens on port %d and dials them there", len(mesh.Devices), port)
-	} else {
-		log.Infoln("[Mesh] %d device(s) expanded into tailnet-peer outbounds", len(mesh.Devices))
+	switch {
+	case discovered && meshListenerDefined(mesh):
+		log.Infoln("[Mesh] discovered %d device(s) from the directory; this device listens on port %d and dials them there", len(peers), port)
+	case discovered:
+		log.Infoln("[Mesh] discovered %d device(s) from the directory into tailnet-peer outbounds", len(peers))
+	case meshListenerDefined(mesh):
+		log.Infoln("[Mesh] %d device(s) expanded; this device listens on port %d and dials them there", len(peers), port)
+	default:
+		log.Infoln("[Mesh] %d device(s) expanded into tailnet-peer outbounds", len(peers))
 	}
 	return nil
+}
+
+// meshDiscoveryConfigured says whether a mesh that lists no device takes its
+// devices from the directory: the directory has to be named, reachable with a
+// token, and there has to be a protocol to dial them with. A block without
+// these is left alone, the way it was before the directory could answer.
+func meshDiscoveryConfigured(mesh *RawMesh) bool {
+	return len(mesh.Devices) == 0 &&
+		strings.TrimSpace(mesh.DirectoryURL) != "" &&
+		strings.TrimSpace(mesh.DirectoryToken) != "" &&
+		len(mesh.Proxy) > 0
+}
+
+// meshPeers answers the devices of a mesh: the ones the block lists by hand -
+// they keep the port the block settles on - or the ones the directory holds.
+func meshPeers(mesh *RawMesh, port int) (peers []meshPeer, discovered bool, err error) {
+	if len(mesh.Devices) > 0 {
+		seenName := make(map[string]bool, len(mesh.Devices))
+		for index, device := range mesh.Devices {
+			name := strings.TrimSpace(device.Name)
+			if !meshDeviceNamePattern.MatchString(name) {
+				return nil, false, fmt.Errorf("mesh device %d: name %q is not a valid device name (letters, digits, . _ -, up to 63)", index, device.Name)
+			}
+			if seenName[name] {
+				return nil, false, fmt.Errorf("mesh device %d: duplicate name %q", index, name)
+			}
+			seenName[name] = true
+			peers = append(peers, meshPeer{Name: name, Port: port})
+		}
+		return peers, false, nil
+	}
+	peers, err = discoverMeshPeers(mesh)
+	if err != nil {
+		return nil, true, err
+	}
+	return peers, true, nil
+}
+
+// discoverMeshPeers reads the device list from the directory and turns it into
+// the peers to expand. A directory that cannot be read is an error rather than
+// an empty mesh: the profile is shared, so an unreachable directory would
+// silently leave every rule that names a device pointing at nothing.
+func discoverMeshPeers(mesh *RawMesh) ([]meshPeer, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), meshDiscoveryTimeout)
+	defer cancel()
+	nodes, err := discoverMeshNodes(ctx, mesh.DirectoryURL, mesh.DirectoryToken, meshDiscoveryTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("mesh: cannot read the devices from the directory %s: %w", mesh.DirectoryURL, err)
+	}
+	// Sorted by id so every device of the mesh expands the same set in the
+	// same order: a profile that has to fall back from a name to an id has to
+	// make the same choice everywhere, or the devices would disagree about
+	// which name belongs to whom.
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+
+	peers := make([]meshPeer, 0, len(nodes))
+	seenName := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		name := strings.TrimSpace(node.Name)
+		if !meshDeviceNamePattern.MatchString(name) {
+			// A name a profile cannot write is no name to reach a device by;
+			// the id always is one.
+			name = node.ID
+		}
+		if seenName[name] {
+			// Two devices cannot answer to one name: the id is unique, so the
+			// one that came later is reached by that instead.
+			name = node.ID
+		}
+		if !meshDeviceNamePattern.MatchString(name) || seenName[name] {
+			log.Warnln("[Mesh] skipping device %q: its name %q cannot be used and its id cannot stand in for it", node.ID, node.Name)
+			continue
+		}
+		seenName[name] = true
+
+		port := node.Port
+		if port < 1 || port > 65535 {
+			port = meshDefaultPort
+		}
+		peers = append(peers, meshPeer{Name: name, ID: node.ID, Port: port})
+	}
+	if len(peers) == 0 {
+		log.Warnln("[Mesh] the directory %s holds no device yet; the profile's rules will not find one", mesh.DirectoryURL)
+	}
+	return peers, nil
 }
 
 // meshListenerDefined says whether the block carries the listener half too:

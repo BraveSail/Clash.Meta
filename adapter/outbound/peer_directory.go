@@ -127,15 +127,6 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 	// system resolver hands out this node's fake-ip placeholders - and binds the
 	// socket to the interface carrying traffic, so a request made to find out
 	// where a peer is cannot end up inside this node's own tunnel.
-	transport := &http.Transport{
-		MaxIdleConns:          100,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, address)
-		},
-	}
 	directory := &PeerDirectory{
 		Base: NewBase(BaseOption{
 			Name:         option.Name,
@@ -144,7 +135,7 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 			ProviderName: option.ProviderName,
 		}),
 		option:    option,
-		client:    &http.Client{Timeout: timeout, Transport: transport},
+		client:    &http.Client{Timeout: timeout, Transport: directoryTransport()},
 		ctx:       ctx,
 		cancel:    cancel,
 		heartbeat: heartbeat,
@@ -155,6 +146,22 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 	go directory.startUnderlayWatch()
 	go directory.run()
 	return directory, nil
+}
+
+// directoryTransport is how a request to the peer directory leaves the machine:
+// mihomo's own dialer, bound to the interface carrying traffic, rather than an
+// ordinary client that would resolve names through the tunnel and connect
+// inside it. Everything here talks to the directory through this.
+func directoryTransport() *http.Transport {
+	return &http.Transport{
+		MaxIdleConns:          100,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
+		},
+	}
 }
 
 func (d *PeerDirectory) MarshalJSON() ([]byte, error) {
