@@ -488,6 +488,52 @@ func TestExpandMeshDerivesTheProtocolWhenNoneIsWritten(t *testing.T) {
 	assert.Equal(t, []any{map[string]any{"uuid": uuid}}, listener["users"])
 }
 
+// VLESS without a certificate is refused at bind time, so the derived protocol
+// has to carry the encryption that stands in for one: the server half on the
+// listener, the matching client half on every outbound.
+func TestExpandMeshDerivesTheEncryptionBothEndsSpeak(t *testing.T) {
+	stubDiscovery(t, []outbound.DirectoryNode{{ID: "aaaa1111", Name: "pc"}}, nil)
+
+	rawCfg := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL:   "https://hub.example",
+			DirectoryToken: "secret",
+			DirectoryID:    "this-device",
+		},
+	}
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	decryption, encryptionValue := meshEncryptionKeys("secret")
+	listener := rawCfg.Listeners[0]
+	// Both halves have to be present, or the core refuses to bind the
+	// listener: a VLESS listener without a certificate, a reality config or
+	// an encryption key is not one it will serve.
+	assert.Equal(t, decryption, listener["decryption"])
+	derived := rawCfg.Proxy[0]["proxy"].(map[string]any)
+	assert.Equal(t, encryptionValue, derived["encryption"])
+
+	// The values have to parse as the core parses them, not merely be non
+	// empty strings.
+	assert.Regexp(t, `^mlkem768x25519plus\.native\.600s\.[A-Za-z0-9_-]{43}$`, decryption)
+	assert.Regexp(t, `^mlkem768x25519plus\.native\.0rtt\.[A-Za-z0-9_-]{43}$`, encryptionValue)
+}
+
+// The pair is what lets two devices of one mesh talk: every device holds the
+// same token, so every device derives the same two halves without anyone
+// writing a key down, and two meshes do not share them.
+func TestMeshEncryptionKeysAreStableAndSeparateTokens(t *testing.T) {
+	decryption, encryptionValue := meshEncryptionKeys("secret")
+	sameDecryption, sameEncryption := meshEncryptionKeys("secret")
+	assert.Equal(t, decryption, sameDecryption)
+	assert.Equal(t, encryptionValue, sameEncryption)
+
+	otherDecryption, otherEncryption := meshEncryptionKeys("another-secret")
+	assert.NotEqual(t, decryption, otherDecryption)
+	assert.NotEqual(t, encryptionValue, otherEncryption)
+}
+
 // The derivation is an identity, so it cannot drift between builds or
 // platforms and it cannot be the same for two meshes.
 func TestMeshUUIDIsStableAndSeparatesTokens(t *testing.T) {

@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/transport/vless/encryption"
 )
 
 // meshDefaultPort is the port a device listens on - and is dialled at - when
@@ -21,6 +23,11 @@ const meshDefaultPort = 8443
 // meshDerivedProtocol is what a mesh speaks when the block does not say: the
 // same protocol every device of it can both serve and dial.
 const meshDerivedProtocol = "vless"
+
+// meshEncryptionPrefix is the VLESS Encryption scheme both halves of a derived
+// mesh key are written under; only the mode and the key that follow it differ
+// between the server and the client.
+const meshEncryptionPrefix = "mlkem768x25519plus.native"
 
 // meshDiscoveryTimeout bounds the one request the mesh makes while the
 // configuration is parsed: a device that cannot reach the directory has to say
@@ -217,19 +224,64 @@ func meshUUID(token string) string {
 // half: one protocol, served by every device and dialled by every device. A
 // block that writes either half is left alone - mixing a derived half with a
 // written one would pair a listener nobody dials.
+//
+// The protocol carries its own encryption - VLESS Encryption, which is
+// TCP-only and needs no certificate - so what travels between two devices is
+// confidential without anyone fetching a certificate for a machine that may
+// not even have a name. The keys are derived from the directory token the same
+// way the user is: every device holds that token, so every device arrives at
+// the same server key and the same client key, and any two of them can talk.
 func meshDerivedProtocols(mesh *RawMesh) (proxy, listener map[string]any) {
 	if len(mesh.Proxy) > 0 || meshListenerDefined(mesh) {
 		return nil, nil
 	}
 	uuid := meshUUID(mesh.DirectoryToken)
+	decryption, encryption := meshEncryptionKeys(mesh.DirectoryToken)
 	return map[string]any{
-			"type": meshDerivedProtocol,
-			"uuid": uuid,
-			"udp":  true,
+			"type":       meshDerivedProtocol,
+			"uuid":       uuid,
+			"udp":        true,
+			"encryption": encryption,
 		}, map[string]any{
-			"type":  meshDerivedProtocol,
-			"users": []any{map[string]any{"uuid": uuid}},
+			"type":       meshDerivedProtocol,
+			"users":      []any{map[string]any{"uuid": uuid}},
+			"decryption": decryption,
 		}
+}
+
+// meshEncryptionKeys derives the VLESS Encryption pair every device of a mesh
+// shares: the server half goes on the listener, the client half on the
+// outbounds. Both are read from one X25519 key whose private half is the
+// directory token's digest, so the pair is stable across builds and platforms
+// and every device of a mesh arrives at the same one without anyone writing a
+// key down. A device that never holds the token cannot derive either half, and
+// neither half is useful without a matching peer.
+func meshEncryptionKeys(token string) (decryption, encryptionValue string) {
+	// The digest is the private key: X25519 takes 32 bytes, which sha256 is.
+	sum := sha256.Sum256([]byte("mesh-encryption:" + token))
+	seed := base64.RawURLEncoding.EncodeToString(sum[:])
+	privateKey, password, _, err := encryption.GenX25519(seed)
+	if err != nil {
+		// The seed is always the right length, so this is unreachable; a
+		// mesh without keys would be one nobody can join, which is worse than
+		// a value that fails to authenticate.
+		log.Errorln("[Mesh] cannot derive the encryption keys from the directory token: %v", err)
+		return "", ""
+	}
+	return meshDecryptionValue(privateKey), meshEncryptionValue(password)
+}
+
+// meshDecryptionValue is the server half as the listener reads it: the X25519
+// private key under a padding scheme and a lifetime the clients must fall
+// inside.
+func meshDecryptionValue(privateKey string) string {
+	return meshEncryptionPrefix + ".600s." + privateKey
+}
+
+// meshEncryptionValue is the client half as the outbound reads it: the public
+// key the server's private half corresponds to, under the same scheme.
+func meshEncryptionValue(password string) string {
+	return meshEncryptionPrefix + ".0rtt." + password
 }
 
 // meshPeers answers the devices of a mesh: the ones the block lists by hand -
