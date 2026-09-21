@@ -64,6 +64,66 @@ func TestExpandMeshBuildsOnePeerPerDeviceAndOneListener(t *testing.T) {
 	assert.Equal(t, "this-device", gt7["directory-id"])
 }
 
+func TestExpandMeshReportsTheNameAndSystemTheAppRead(t *testing.T) {
+	// A phone's own host name says nothing (the UTS name is "localhost" and an
+	// app cannot change it), so the app reads the name the owner typed and the
+	// system it runs, and both travel to the directory through every outbound
+	// that reports for this device - the per-peer ones and the entry the rules
+	// point at.
+	rawCfg := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL: "https://hub.example",
+			DirectoryID:  "this-device",
+			DeviceName:   "小明的手机",
+			DeviceOS:     "Android 14",
+			Proxy:        map[string]any{"type": "direct"},
+			Devices: []RawMeshDevice{
+				{Name: "pc", ID: "a1b2c3d4e5f6", Domain: "pc.lan"},
+			},
+		},
+	}
+
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]map[string]any{}
+	for _, proxy := range rawCfg.Proxy {
+		byName[proxy["name"].(string)] = proxy
+	}
+	peer, ok := byName["pc"]
+	if !ok {
+		t.Fatalf("no outbound for the device; got %v", byName)
+	}
+	assert.Equal(t, "小明的手机", peer["hostname"])
+	assert.Equal(t, "Android 14", peer["os"])
+	entry, ok := byName[meshEntryName]
+	if !ok {
+		t.Fatalf("no mesh entry; got %v", byName)
+	}
+	assert.Equal(t, "小明的手机", entry["hostname"])
+	assert.Equal(t, "Android 14", entry["os"])
+}
+
+func TestExpandMeshSendsNoNameWhenTheAppWroteNone(t *testing.T) {
+	// The fields are the app's to write: a profile that ran through an app
+	// that did not know them, or a hand-written one, reports the system host
+	// name alone - the core sends nothing for either.
+	rawCfg := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL: "https://hub.example",
+			Proxy:        map[string]any{"type": "direct"},
+			Devices:      []RawMeshDevice{{Name: "pc"}},
+		},
+	}
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	_, hasName := rawCfg.Proxy[0]["hostname"]
+	_, hasOS := rawCfg.Proxy[0]["os"]
+	assert.False(t, hasName)
+	assert.False(t, hasOS)
+}
+
 func TestExpandMeshDefaultsThePortWhenNobodyNamesOne(t *testing.T) {
 	rawCfg := &RawConfig{
 		Mesh: &RawMesh{

@@ -54,6 +54,12 @@ type TailnetPeerOption struct {
 	// go through, for a device whose network cannot reach the directory
 	// directly.
 	DirectoryProxy string `proxy:"directory-proxy,omitempty"`
+	// Hostname and OS are what this device reports itself as: the name the
+	// machine carries (a phone's system host name is "localhost") and its
+	// system with version. The app writes them per device, so one shared
+	// profile carries its own values here.
+	Hostname string `proxy:"hostname,omitempty"`
+	OS       string `proxy:"os,omitempty"`
 	// Heartbeat is how often the directory client this outbound shares reports
 	// even when nothing changed, in seconds; the inline form of the directory
 	// takes the same option as a `peer-directory` outbound would.
@@ -133,6 +139,8 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 			Port:      option.Port,
 			Heartbeat: option.Heartbeat,
 			ViaProxy:  option.DirectoryProxy,
+			Hostname:  option.Hostname,
+			OS:        option.OS,
 		})
 		if err != nil {
 			return nil, err

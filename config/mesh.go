@@ -85,6 +85,14 @@ type RawMesh struct {
 	// itself carries. The platform is not part of the profile: each device
 	// detects its own and reports it to the directory.
 	DirectoryID string `yaml:"directory-id,omitempty" json:"directory-id,omitempty"`
+	// DeviceName is the name this device reports to the directory. Like the
+	// id it is computed per device by the app: a phone's own host name is
+	// "localhost", which an app cannot change, so the name its owner typed
+	// travels here instead. Empty keeps the system host name.
+	DeviceName string `yaml:"device-name,omitempty" json:"device-name,omitempty"`
+	// DeviceOS is the system this device runs with its version, e.g.
+	// "Android 14", written per device by the app and shown by the directory.
+	DeviceOS string `yaml:"device-os,omitempty" json:"device-os,omitempty"`
 	// Heartbeat is how often this device reports even when nothing changed,
 	// in seconds; every device takes the same value.
 	Heartbeat int `yaml:"heartbeat,omitempty" json:"heartbeat,omitempty"`
@@ -200,6 +208,12 @@ func expandMesh(rawCfg *RawConfig) error {
 		if mesh.DirectoryID != "" {
 			mapping["directory-id"] = mesh.DirectoryID
 		}
+		if mesh.DeviceName != "" {
+			mapping["hostname"] = mesh.DeviceName
+		}
+		if mesh.DeviceOS != "" {
+			mapping["os"] = mesh.DeviceOS
+		}
 		if mesh.Heartbeat > 0 {
 			mapping["heartbeat"] = mesh.Heartbeat
 		}
@@ -262,6 +276,12 @@ func buildMeshEntry(mesh *RawMesh, domains map[string]string) map[string]any {
 	}
 	if mesh.DirectoryID != "" {
 		mapping["directory-id"] = mesh.DirectoryID
+	}
+	if mesh.DeviceName != "" {
+		mapping["hostname"] = mesh.DeviceName
+	}
+	if mesh.DeviceOS != "" {
+		mapping["os"] = mesh.DeviceOS
 	}
 	if mesh.Heartbeat > 0 {
 		mapping["heartbeat"] = mesh.Heartbeat

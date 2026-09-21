@@ -64,6 +64,14 @@ type PeerDirectoryOption struct {
 	// through. A device whose network resets a direct connection to the
 	// directory can still report and look up through a proxy it can reach.
 	ViaProxy string `proxy:"via-proxy,omitempty"`
+	// Hostname is the name this node reports under, for a platform whose own
+	// host name says nothing useful (a phone's UTS name is "localhost" and
+	// an app cannot change it). The app reads the name the machine carries
+	// and writes it here; empty keeps the system host name.
+	Hostname string `proxy:"hostname,omitempty"`
+	// OS is the system this node runs, e.g. "Android 14", shown by the
+	// directory beside the name. Empty sends nothing.
+	OS string `proxy:"os,omitempty"`
 }
 
 // PeerDirectory keeps one node's address current in a directory service and
@@ -416,9 +424,20 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 		"platform": runtime.GOOS,
 	}
 	// The host name travels too: an id is a digest, and a digest is not what a
-	// reader recognises a machine by until they name it themselves.
-	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+	// reader recognises a machine by until they name it themselves. The name
+	// the app read outranks the system one, which on a phone is the useless
+	// "localhost" an app cannot change.
+	hostname := strings.TrimSpace(d.option.Hostname)
+	if hostname == "" {
+		if system, err := os.Hostname(); err == nil {
+			hostname = system
+		}
+	}
+	if hostname != "" {
 		payload["hostname"] = hostname
+	}
+	if osName := strings.TrimSpace(d.option.OS); osName != "" {
+		payload["os"] = osName
 	}
 	if addr != "" {
 		payload["addr"] = addr
