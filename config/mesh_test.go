@@ -427,14 +427,14 @@ func TestExpandMeshKeepsListedDevicesOffTheDirectory(t *testing.T) {
 }
 
 // Reading the directory needs somewhere to read it from: a mesh without the
-// url, the token or a protocol to dial with is left alone rather than
-// discovered from nothing.
+// url or the token is left alone rather than discovered from nothing. A block
+// that names both speaks the protocol the core derives, so it is no longer
+// part of this bunch.
 func TestExpandMeshWithoutADirectoryStaysANoOp(t *testing.T) {
 	calls := stubDiscovery(t, []outbound.DirectoryNode{{ID: "aaaa1111", Name: "pc"}}, nil)
 
 	for _, rawCfg := range []*RawConfig{
 		{Mesh: &RawMesh{DirectoryURL: "https://hub.example", Proxy: map[string]any{"type": "direct"}}},
-		{Mesh: &RawMesh{DirectoryURL: "https://hub.example", DirectoryToken: "secret"}},
 		{Mesh: &RawMesh{DirectoryToken: "secret", Proxy: map[string]any{"type": "direct"}}},
 		{Mesh: &RawMesh{Proxy: map[string]any{"type": "direct"}}},
 	} {
@@ -448,6 +448,74 @@ func TestExpandMeshWithoutADirectoryStaysANoOp(t *testing.T) {
 	if *calls != 0 {
 		t.Fatalf("the directory was read %d times by a mesh without one", *calls)
 	}
+}
+
+// The block someone writes on the dashboard names the directory and nothing
+// else: the protocol between the devices is derived, so a mesh with both
+// halves of the directory and no protocol still reaches its devices.
+func TestExpandMeshDerivesTheProtocolWhenNoneIsWritten(t *testing.T) {
+	stubDiscovery(t, []outbound.DirectoryNode{
+		{ID: "aaaa1111", Name: "pc"},
+		{ID: "bbbb2222", Name: "gt7"},
+	}, nil)
+
+	rawCfg := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL:   "https://hub.example",
+			DirectoryToken: "secret",
+			DirectoryID:    "this-device",
+		},
+	}
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawCfg.Proxy) != 2 {
+		t.Fatalf("expanded %d proxies, want one per device", len(rawCfg.Proxy))
+	}
+	if len(rawCfg.Listeners) != 1 {
+		t.Fatalf("expanded %d listeners, want the one peers dial this device at", len(rawCfg.Listeners))
+	}
+
+	uuid := meshUUID("secret")
+	derived := rawCfg.Proxy[0]["proxy"].(map[string]any)
+	assert.Equal(t, meshDerivedProtocol, derived["type"])
+	assert.Equal(t, uuid, derived["uuid"])
+
+	// The listener serves the user the outbounds dial: one derivation, both
+	// ends.
+	listener := rawCfg.Listeners[0]
+	assert.Equal(t, meshDerivedProtocol, listener["type"])
+	assert.Equal(t, []any{map[string]any{"uuid": uuid}}, listener["users"])
+}
+
+// The derivation is an identity, so it cannot drift between builds or
+// platforms and it cannot be the same for two meshes.
+func TestMeshUUIDIsStableAndSeparatesTokens(t *testing.T) {
+	first := meshUUID("secret")
+	assert.Equal(t, first, meshUUID("secret"))
+	assert.NotEqual(t, first, meshUUID("another-secret"))
+	assert.Regexp(t, `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, first)
+}
+
+// A block that writes its protocol keeps it: the derivation only fills a
+// block that wrote neither half, so a hand-written profile is untouched.
+func TestExpandMeshKeepsAWrittenProtocol(t *testing.T) {
+	stubDiscovery(t, []outbound.DirectoryNode{{ID: "aaaa1111", Name: "pc"}}, nil)
+
+	written := map[string]any{"type": "vless", "uuid": "written-uuid", "udp": true}
+	rawCfg := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL:   "https://hub.example",
+			DirectoryToken: "secret",
+			Proxy:          written,
+		},
+	}
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, written, rawCfg.Proxy[0]["proxy"])
+	// Nothing was derived, so no listener was invented either.
+	assert.Empty(t, rawCfg.Listeners)
 }
 
 // A device need not serve on the default port: the port its record carries is

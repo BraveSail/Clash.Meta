@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"regexp"
@@ -16,6 +17,10 @@ import (
 // meshDefaultPort is the port a device listens on - and is dialled at - when
 // its entry in the mesh does not name one.
 const meshDefaultPort = 8443
+
+// meshDerivedProtocol is what a mesh speaks when the block does not say: the
+// same protocol every device of it can both serve and dial.
+const meshDerivedProtocol = "vless"
 
 // meshDiscoveryTimeout bounds the one request the mesh makes while the
 // configuration is parsed: a device that cannot reach the directory has to say
@@ -93,6 +98,14 @@ func expandMesh(rawCfg *RawConfig) error {
 	if strings.TrimSpace(mesh.DirectoryURL) == "" {
 		return errors.New("mesh: directory-url is required, the peer directory the devices report to")
 	}
+	// A block that writes neither half speaks the protocol the core derives
+	// from the directory token: nothing between two devices has to be written
+	// down, and every device derives the same one. Writing either half opts
+	// the whole block out of the derivation.
+	if derivedProxy, derivedListener := meshDerivedProtocols(mesh); derivedProxy != nil {
+		mesh.Proxy = derivedProxy
+		mesh.Listener = derivedListener
+	}
 	if len(mesh.Proxy) == 0 {
 		return errors.New("mesh: proxy is required, the protocol this device dials a peer with")
 	}
@@ -159,8 +172,36 @@ func expandMesh(rawCfg *RawConfig) error {
 func meshDiscoveryConfigured(mesh *RawMesh) bool {
 	return len(mesh.Devices) == 0 &&
 		strings.TrimSpace(mesh.DirectoryURL) != "" &&
-		strings.TrimSpace(mesh.DirectoryToken) != "" &&
-		len(mesh.Proxy) > 0
+		strings.TrimSpace(mesh.DirectoryToken) != ""
+}
+
+// meshUUID is the user a mesh speaks under, derived from its directory token:
+// every device of a mesh holds the same token, so every device derives the
+// same user without anyone writing one down. The derivation has to be stable
+// across builds and platforms - it is an identity, not a hash table slot.
+func meshUUID(token string) string {
+	sum := sha256.Sum256([]byte("mesh:" + token))
+	// Formatted as a UUID so the field reads like every other vless user.
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
+}
+
+// meshDerivedProtocols is what a mesh speaks when the block writes neither
+// half: one protocol, served by every device and dialled by every device. A
+// block that writes either half is left alone - mixing a derived half with a
+// written one would pair a listener nobody dials.
+func meshDerivedProtocols(mesh *RawMesh) (proxy, listener map[string]any) {
+	if len(mesh.Proxy) > 0 || meshListenerDefined(mesh) {
+		return nil, nil
+	}
+	uuid := meshUUID(mesh.DirectoryToken)
+	return map[string]any{
+			"type": meshDerivedProtocol,
+			"uuid": uuid,
+			"udp":  true,
+		}, map[string]any{
+			"type":  meshDerivedProtocol,
+			"users": []any{map[string]any{"uuid": uuid}},
+		}
 }
 
 // meshPeers answers the devices of a mesh: the ones the block lists by hand -
