@@ -538,3 +538,95 @@ func TestExpandMeshUsesEachDiscoveredDevicePort(t *testing.T) {
 	// settles on one port for everyone.
 	assert.Equal(t, meshDefaultPort, rawCfg.Listeners[0]["port"])
 }
+
+// The app reads the directory while it builds the configuration - the core
+// cannot, because a block reachable only through the tunnel is not up yet by
+// the time the block is parsed - and writes what it found beside each name.
+// The runtime then asks by id, and the parse itself touches no network.
+func TestExpandMeshTakesTheDeviceListTheAppResolved(t *testing.T) {
+	calls := stubDiscovery(t, nil, errors.New("the directory must not be read during the parse"))
+
+	rawCfg := discoveredMesh([]RawMeshDevice{
+		{Name: "PC", ID: "a1b2c3d4e5f6"},
+		{Name: "gt7", ID: "0f1e2d3c4b5a", Port: 9443},
+	})
+	rawCfg.Mesh.DirectoryResolved = true
+	rawCfg.Mesh.DirectoryProxy = "http://127.0.0.1:7890"
+
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 0 {
+		t.Fatalf("a resolved device list still read the directory %d times", *calls)
+	}
+	if len(rawCfg.Proxy) != 2 {
+		t.Fatalf("expanded %d proxies, want one per resolved device", len(rawCfg.Proxy))
+	}
+
+	pc := rawCfg.Proxy[0]
+	assert.Equal(t, "PC", pc["name"])
+	assert.Equal(t, "PC", pc["peer"])
+	// The id travels with the device so the runtime asks the directory about
+	// the record rather than the name: a device renamed on the dashboard
+	// keeps resolving.
+	assert.Equal(t, "a1b2c3d4e5f6", pc["directory-peer"])
+	// The proxy travels to the runtime half: reading the list and asking
+	// about a peer go through the same door.
+	assert.Equal(t, "http://127.0.0.1:7890", pc["directory-proxy"])
+
+	gt7 := rawCfg.Proxy[1]
+	assert.Equal(t, "0f1e2d3c4b5a", gt7["directory-peer"])
+	assert.Equal(t, 9443, gt7["port"])
+}
+
+// A resolved list that came back empty is a mesh with nothing to dial yet: the
+// parse takes it as it stands rather than asking the same blocked directory
+// again, which is what keeps a device whose network cannot reach the directory
+// from failing to start.
+func TestExpandMeshAcceptsAnEmptyResolvedList(t *testing.T) {
+	calls := stubDiscovery(t, nil, errors.New("the directory must not be read during the parse"))
+
+	rawCfg := discoveredMesh(nil)
+	rawCfg.Mesh.DirectoryResolved = true
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatalf("an empty resolved list failed the parse: %v", err)
+	}
+	if *calls != 0 {
+		t.Fatalf("an empty resolved list read the directory %d times", *calls)
+	}
+	if len(rawCfg.Proxy) != 0 {
+		t.Fatalf("expanded %d proxies from an empty list", len(rawCfg.Proxy))
+	}
+	// The listener still stands: this device serves whether or not a peer is
+	// known yet, and the next list will name one.
+	if len(rawCfg.Listeners) != 1 {
+		t.Fatalf("expanded %d listeners, want the one this device serves", len(rawCfg.Listeners))
+	}
+}
+
+// A list written by hand carries no id and no resolved flag: it is a list of
+// names, and asking the directory about them would be asking about nothing.
+func TestExpandMeshTakesAHandWrittenListWithoutIDs(t *testing.T) {
+	calls := stubDiscovery(t, nil, errors.New("a hand-written list must not be read from the directory"))
+
+	rawCfg := discoveredMesh([]RawMeshDevice{{Name: "pc", Port: 9443}})
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	if *calls != 0 {
+		t.Fatalf("a hand-written list read the directory %d times", *calls)
+	}
+	assert.Equal(t, "pc", rawCfg.Proxy[0]["name"])
+	assert.Nil(t, rawCfg.Proxy[0]["directory-peer"])
+	assert.Nil(t, rawCfg.Proxy[0]["directory-proxy"])
+}
+
+// An id that cannot be asked about is a mistake in the generated list, and the
+// parse says so rather than letting the runtime ask a malformed question.
+func TestExpandMeshRejectsAnInvalidResolvedID(t *testing.T) {
+	stubDiscovery(t, nil, errors.New("the directory must not be read during the parse"))
+
+	rawCfg := discoveredMesh([]RawMeshDevice{{Name: "pc", ID: "a b"}})
+	rawCfg.Mesh.DirectoryResolved = true
+	assert.Error(t, expandMesh(rawCfg))
+}

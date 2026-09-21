@@ -7,11 +7,13 @@ import (
 	"github.com/metacubex/mihomo/adapter/outbound"
 )
 
-// One directory client per (url, token, id, port): a shared profile lists
+// One directory client per (url, token, id, port, proxy): a shared profile lists
 // several peers of the same node, and each of them would otherwise report the
 // same address separately. The outbound's name is not part of the key - two
 // peers of one node share the client - while the port is, because it is what
-// the report publishes.
+// the report publishes. A client that goes through a proxy is a different
+// client from one that does not, or a node would send its reports down a
+// transport it was never configured for.
 var directoryClients = struct {
 	sync.Mutex
 	clients map[string]*sharedDirectoryClient
@@ -23,7 +25,7 @@ type sharedDirectoryClient struct {
 }
 
 func acquireDirectoryClient(option outbound.PeerDirectoryOption) (*outbound.PeerDirectory, error) {
-	key := option.URL + "\x00" + option.Token + "\x00" + option.ID + "\x00" + strconv.Itoa(option.Port)
+	key := option.URL + "\x00" + option.Token + "\x00" + option.ID + "\x00" + strconv.Itoa(option.Port) + "\x00" + option.ViaProxy
 
 	directoryClients.Lock()
 	if existing, ok := directoryClients.clients[key]; ok {

@@ -42,6 +42,12 @@ var meshDeviceNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,63}$`)
 // to these names.
 type RawMeshDevice struct {
 	Name string `yaml:"name" json:"name"`
+	// ID is the record this device answers to in the directory. The app
+	// resolves the directory while it builds the configuration and writes
+	// what it found next to the name, so the runtime asks by id and a device
+	// renamed on the dashboard still resolves to the same machine. Empty for
+	// a device written down by hand.
+	ID string `yaml:"id,omitempty" json:"id,omitempty"`
 	// Port is the port this device serves on and is dialled at. Every device
 	// takes the same value - a device reports one port to the directory - so
 	// writing it on the entries that differ from the default is enough.
@@ -73,6 +79,17 @@ type RawMesh struct {
 	// that reported, so a profile running on all of them does not have to
 	// name them.
 	Devices []RawMeshDevice `yaml:"devices" json:"devices"`
+	// DirectoryResolved says the app already read the device list and wrote
+	// it into Devices. The list is then taken as it stands - even when it is
+	// empty - and nothing is read while the configuration is parsed, which is
+	// what lets a device whose network blocks the directory over a direct
+	// connection still start.
+	DirectoryResolved bool `yaml:"directory-resolved,omitempty" json:"directory-resolved,omitempty"`
+	// DirectoryProxy is an HTTP proxy URL that runtime requests to the
+	// directory go through, so a directory a direct connection cannot reach
+	// stays readable and reportable. Empty keeps them off the tunnel, the way
+	// they have always gone.
+	DirectoryProxy string `yaml:"directory-proxy,omitempty" json:"directory-proxy,omitempty"`
 }
 
 // meshPeer is one device of a mesh as the expansion needs it: the name the
@@ -92,7 +109,12 @@ type meshPeer struct {
 // the ones the directory holds, read while the configuration is parsed.
 func expandMesh(rawCfg *RawConfig) error {
 	mesh := rawCfg.Mesh
-	if mesh == nil || (len(mesh.Devices) == 0 && !meshDiscoveryConfigured(mesh)) {
+	if mesh == nil {
+		return nil
+	}
+	// A resolved block carries its list already, even when that list is
+	// empty; an unresolved one has to be worth reading from the directory.
+	if len(mesh.Devices) == 0 && !mesh.DirectoryResolved && !meshDiscoveryConfigured(mesh) {
 		return nil
 	}
 	if strings.TrimSpace(mesh.DirectoryURL) == "" {
@@ -150,7 +172,13 @@ func expandMesh(rawCfg *RawConfig) error {
 		if mesh.Heartbeat > 0 {
 			mapping["heartbeat"] = mesh.Heartbeat
 		}
+		if mesh.DirectoryProxy != "" {
+			mapping["directory-proxy"] = mesh.DirectoryProxy
+		}
 		rawCfg.Proxy = append(rawCfg.Proxy, mapping)
+	}
+	if mesh.DirectoryResolved && len(mesh.Devices) == 0 {
+		log.Warnln("[Mesh] the app resolved no device from the directory %s; the profile's rules will not find one", mesh.DirectoryURL)
 	}
 	switch {
 	case discovered && meshListenerDefined(mesh):
@@ -218,9 +246,19 @@ func meshPeers(mesh *RawMesh, port int) (peers []meshPeer, discovered bool, err 
 				return nil, false, fmt.Errorf("mesh device %d: duplicate name %q", index, name)
 			}
 			seenName[name] = true
-			peers = append(peers, meshPeer{Name: name, Port: port})
+			id := strings.TrimSpace(device.ID)
+			if id != "" && !meshDeviceNamePattern.MatchString(id) {
+				return nil, false, fmt.Errorf("mesh device %d: id %q is not a valid directory id (letters, digits, . _ -, up to 63)", index, device.ID)
+			}
+			peers = append(peers, meshPeer{Name: name, ID: id, Port: port})
 		}
 		return peers, false, nil
+	}
+	if mesh.DirectoryResolved {
+		// The app read the directory and it held no device: there is nothing
+		// to dial yet, and asking here would block the start on the same
+		// network that could not answer.
+		return nil, false, nil
 	}
 	peers, err = discoverMeshPeers(mesh)
 	if err != nil {

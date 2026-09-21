@@ -378,3 +378,68 @@ func TestPickReportAddressPrefersAGlobalIpv6OnRealInterfaces(t *testing.T) {
 		t.Fatalf("pickReportAddress = %q, want nothing to publish", got)
 	}
 }
+
+func TestDirectoryProxyTransportRejectsBadURLs(t *testing.T) {
+	for name, raw := range map[string]string{
+		"socks":       "socks5://127.0.0.1:1080",
+		"no scheme":   "127.0.0.1:7890",
+		"no host":     "http://",
+		"unparseable": "http://%zz",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := directoryProxyTransport(raw); err == nil {
+				t.Fatalf("proxy url %q was accepted", raw)
+			}
+		})
+	}
+}
+
+// A network that resets the direct connection to the directory leaves the node
+// unable to report where it is; the proxy it was given is the way back in. The
+// directory address here is one no direct route can reach, so anything that
+// arrives at the proxy arrived because it took the proxy.
+func TestPeerDirectoryReachesTheDirectoryThroughItsProxy(t *testing.T) {
+	var sawReport, sawLookup atomic.Bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("content-type", "application/json")
+		switch request.URL.Path {
+		case "/report":
+			sawReport.Store(true)
+			writer.Header().Set("etag", `"2409:8a55::1:8443"`)
+			_, _ = writer.Write([]byte(`{"addr":"2409:8a55::1","port":8443}`))
+		case "/lookup":
+			sawLookup.Store(true)
+			_, _ = writer.Write([]byte(`{"nodes":{"peer":{"id":"peer","addr":"::1","port":8443}}}`))
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer proxy.Close()
+
+	node, err := NewPeerDirectory(PeerDirectoryOption{
+		Name:     "proxy directory",
+		URL:      "http://127.0.0.1:1",
+		Token:    "secret",
+		ID:       "this-device",
+		Port:     8443,
+		ViaProxy: proxy.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = node.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+		t.Fatalf("lookup through the proxy failed: %v", err)
+	}
+	node.report(ctx, "2409:8a55::1")
+
+	if !sawLookup.Load() {
+		t.Fatal("the lookup never reached the proxy")
+	}
+	if !sawReport.Load() {
+		t.Fatal("the report never reached the proxy")
+	}
+}

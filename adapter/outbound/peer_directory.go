@@ -60,6 +60,10 @@ type PeerDirectoryOption struct {
 	// Heartbeat is how often this node reports even when nothing changed, in
 	// seconds. Keep it well inside the directory's online window.
 	Heartbeat int `proxy:"heartbeat,omitempty"`
+	// ViaProxy is an HTTP proxy URL every request to the directory goes
+	// through. A device whose network resets a direct connection to the
+	// directory can still report and look up through a proxy it can reach.
+	ViaProxy string `proxy:"via-proxy,omitempty"`
 }
 
 // PeerDirectory keeps one node's address current in a directory service and
@@ -114,6 +118,14 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 	if option.Timeout > 0 {
 		timeout = time.Duration(option.Timeout) * time.Second
 	}
+	transport := directoryTransport()
+	if strings.TrimSpace(option.ViaProxy) != "" {
+		proxyTransport, err := directoryProxyTransport(option.ViaProxy)
+		if err != nil {
+			return nil, err
+		}
+		transport = proxyTransport
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	heartbeat := peerDirectoryDefaultHeartbeat
 	if option.Heartbeat > 0 {
@@ -135,7 +147,7 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 			ProviderName: option.ProviderName,
 		}),
 		option:    option,
-		client:    &http.Client{Timeout: timeout, Transport: directoryTransport()},
+		client:    &http.Client{Timeout: timeout, Transport: transport},
 		ctx:       ctx,
 		cancel:    cancel,
 		heartbeat: heartbeat,
@@ -162,6 +174,28 @@ func directoryTransport() *http.Transport {
 			return dialer.DialContext(ctx, network, address)
 		},
 	}
+}
+
+// directoryProxyTransport sends the request through an HTTP proxy instead of
+// straight out of this machine. A network that resets the direct connection to
+// the directory leaves the node unable to report where it is, which is exactly
+// when a proxy the node can reach is the only way to stay in the directory.
+// The proxy is dialled with mihomo's own dialer like every other directory
+// request, so reaching the proxy cannot depend on the tunnel either.
+func directoryProxyTransport(rawProxyURL string) (*http.Transport, error) {
+	proxyURL, err := url.Parse(strings.TrimSpace(rawProxyURL))
+	if err != nil {
+		return nil, fmt.Errorf("peer-directory: invalid proxy url %q: %w", rawProxyURL, err)
+	}
+	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" {
+		return nil, fmt.Errorf("peer-directory: proxy url %q must be http or https", rawProxyURL)
+	}
+	if proxyURL.Host == "" {
+		return nil, fmt.Errorf("peer-directory: proxy url %q names no host", rawProxyURL)
+	}
+	transport := directoryTransport()
+	transport.Proxy = http.ProxyURL(proxyURL)
+	return transport, nil
 }
 
 func (d *PeerDirectory) MarshalJSON() ([]byte, error) {

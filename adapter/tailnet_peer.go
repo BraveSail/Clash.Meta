@@ -40,6 +40,10 @@ type TailnetPeerOption struct {
 	// DirectoryPeer is the name to ask the directory for; it defaults to [Peer],
 	// which may be an address the directory does not know.
 	DirectoryPeer string `proxy:"directory-peer,omitempty"`
+	// DirectoryProxy is an HTTP proxy URL this outbound's directory requests
+	// go through, for a device whose network cannot reach the directory
+	// directly.
+	DirectoryProxy string `proxy:"directory-proxy,omitempty"`
 	// Heartbeat is how often the directory client this outbound shares reports
 	// even when nothing changed, in seconds; the inline form of the directory
 	// takes the same option as a `peer-directory` outbound would.
@@ -106,6 +110,7 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 			ID:        option.directoryID(),
 			Port:      option.Port,
 			Heartbeat: option.Heartbeat,
+			ViaProxy:  option.DirectoryProxy,
 		})
 		if err != nil {
 			return nil, err
