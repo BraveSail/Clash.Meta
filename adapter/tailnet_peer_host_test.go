@@ -130,3 +130,40 @@ func TestTailnetPeerResolvesAnEchoByTheRequestedName(t *testing.T) {
 		t.Fatalf("resolveForEcho = %q, want the peer's recorded address", host)
 	}
 }
+
+// A mesh entry carries a `domains` map instead of a `peer`: one rule covers
+// every device, and the name the caller used decides which one answers. An echo
+// at such a name has to be recognised as this entry's business, or the entry
+// refuses a device it is the only one able to reach.
+func TestTailnetPeerAnswersAnEchoForAMappedDomain(t *testing.T) {
+	stub := &stubDirectory{ownID: "this-device", peerID: "ont", peerAddr: "2409:895a::9"}
+	server := stub.serve()
+	t.Cleanup(server.Close)
+
+	peer := newTestPeer(t, TailnetPeerOption{
+		Name:           "mesh",
+		Port:           23333,
+		Proxy:          map[string]any{"type": "direct", "name": "inner"},
+		DirectoryURL:   server.URL,
+		DirectoryToken: "secret",
+		DirectoryID:    "this-device",
+		Domains:        map[string]string{"router.lan": "ont"},
+	})
+
+	metadata := &C.Metadata{
+		Host:    "router.lan",
+		DstIP:   netip.MustParseAddr("2409:895a::9"),
+		DstPort: 0,
+	}
+	if !peer.destinationIsThePeer(metadata) {
+		t.Fatal("destinationIsThePeer(router.lan) = false, want true: the entry maps that name")
+	}
+
+	address, err := peer.ICMPDestination(context.Background(), metadata)
+	if err != nil {
+		t.Fatalf("ICMPDestination = %v, want the mapped device's address", err)
+	}
+	if address != netip.MustParseAddr("2409:895a::9") {
+		t.Fatalf("ICMPDestination = %v, want 2409:895a::9", address)
+	}
+}

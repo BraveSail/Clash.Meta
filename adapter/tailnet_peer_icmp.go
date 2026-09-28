@@ -92,10 +92,19 @@ func familyName(ipv6 bool) string {
 // destinationIsThePeer reports whether the flow was aimed at this outbound's
 // peer by name ("pc.lan", "pc", "pc.tailnet.ts.net") rather than at some other
 // address the rules happen to send through it.
+//
+// A mesh entry names no peer of its own: it serves every device the profile
+// mapped, and `domains` is what says which name belongs to it. Reading only
+// [Peer]/[DirectoryPeer] would refuse every device such an entry answers for -
+// which is what left a ping at a mapped name unreachable while a connection to
+// the same name worked, since a dial asks by the name and never consults this.
 func (t *TailnetPeer) destinationIsThePeer(metadata *C.Metadata) bool {
 	host := strings.ToLower(strings.TrimSuffix(metadata.Host, "."))
 	if host == "" {
 		return false
+	}
+	if _, ok := t.option.Domains[host]; ok {
+		return true
 	}
 	for _, name := range []string{t.option.Peer, t.directoryNameKey()} {
 		if name == "" {
