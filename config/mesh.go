@@ -18,7 +18,7 @@ import (
 
 // meshDefaultPort is the port a device listens on - and is dialled at - when
 // its entry in the mesh does not name one.
-const meshDefaultPort = 8443
+const meshDefaultPort = 23333
 
 // meshDerivedProtocol is what a mesh speaks when the block does not say: the
 // same protocol every device of it can both serve and dial.

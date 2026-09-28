@@ -57,7 +57,7 @@ func TestExpandMeshBuildsOnePeerPerDeviceAndOneListener(t *testing.T) {
 
 	gt7 := rawCfg.Proxy[1]
 	assert.Equal(t, "gt7", gt7["name"])
-	// A device without a port takes the one the mesh settles on, 8443 when
+	// A device without a port takes the one the mesh settles on, 23333 when
 	// nobody names one.
 	assert.Equal(t, 9443, gt7["port"])
 	// Every device shares the same directory identity: it is this device's own.
