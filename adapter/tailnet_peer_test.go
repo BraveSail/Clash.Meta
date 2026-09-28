@@ -115,9 +115,9 @@ func TestTailnetPeerResolvesThroughTheDirectory(t *testing.T) {
 		DirectoryID:    "pc",
 	})
 
-	host, self, err := peer.resolve(context.Background())
+	host, self, err := peer.resolveForEcho(context.Background(), &C.Metadata{Host: "gt7.lan"})
 	if err != nil || self || host != "2409:895a::1" {
-		t.Fatalf("resolve = %q self=%v err=%v", host, self, err)
+		t.Fatalf("resolveForEcho = %q self=%v err=%v", host, self, err)
 	}
 
 	proxy, err := peer.proxyForDial(context.Background(), "")
@@ -136,7 +136,7 @@ func TestTailnetPeerResolvesThroughTheDirectory(t *testing.T) {
 	// next connection after that window dials the new address.
 	time.Sleep(2300 * time.Millisecond)
 	peer.invalidate()
-	host, _, err = peer.resolve(context.Background())
+	host, _, err = peer.resolveForEcho(context.Background(), nil)
 	if err != nil || host != "2409:895a::9" {
 		t.Fatalf("resolve after the peer moved = %q err=%v", host, err)
 	}
@@ -156,7 +156,7 @@ func TestTailnetPeerDegradesToDirectForItself(t *testing.T) {
 		DirectoryID:  "pc",
 	})
 
-	host, self, err := peer.resolve(context.Background())
+	host, self, err := peer.resolveForEcho(context.Background(), nil)
 	if err != nil || !self || host != "" {
 		t.Fatalf("resolve(self) = %q self=%v err=%v", host, self, err)
 	}
@@ -183,7 +183,7 @@ func TestTailnetPeerWithoutADirectoryNameFails(t *testing.T) {
 		Proxy:        map[string]any{"type": "direct", "name": "inner"},
 		DirectoryURL: server.URL,
 	})
-	if _, _, err := peer.resolve(context.Background()); err == nil {
+	if _, _, err := peer.resolveForEcho(context.Background(), nil); err == nil {
 		t.Fatal("a device without a directory name resolved a peer")
 	}
 }
@@ -201,7 +201,7 @@ func TestTailnetPeerUnknownPeerFails(t *testing.T) {
 		DirectoryURL: server.URL,
 		DirectoryID:  "pc",
 	})
-	if _, _, err := peer.resolve(context.Background()); err == nil {
+	if _, _, err := peer.resolveForEcho(context.Background(), nil); err == nil {
 		t.Fatal("unknown peer resolved")
 	}
 }
@@ -284,7 +284,7 @@ func TestTailnetPeersShareOneDirectoryClient(t *testing.T) {
 			DirectoryToken: "secret",
 			DirectoryID:    "pc",
 		})
-		if _, _, err := peer.resolve(context.Background()); err != nil {
+		if _, _, err := peer.resolveForEcho(context.Background(), nil); err != nil {
 			t.Fatal(err)
 		}
 	}

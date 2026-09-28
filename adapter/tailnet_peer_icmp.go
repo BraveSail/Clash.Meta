@@ -29,7 +29,7 @@ const tailnetEchoTimeout = 3 * time.Second
 // asked this peer to answer for an address that is not its own - and the tunnel
 // side answers with the error a router would send.
 func (t *TailnetPeer) ICMPDestination(ctx context.Context, metadata *C.Metadata) (netip.Addr, error) {
-	host, self, err := t.resolve(ctx)
+	host, self, err := t.resolveForEcho(ctx, metadata)
 	if err != nil {
 		return netip.Addr{}, err
 	}
@@ -68,7 +68,7 @@ func (t *TailnetPeer) ICMPDestination(ctx context.Context, metadata *C.Metadata)
 // message describes a packet this stack would have answered itself, so it is
 // answered here. Anything else is refused, because this outbound moves no echo.
 func (t *TailnetPeer) ExchangeICMP(ctx context.Context, metadata *C.Metadata, request []byte) ([]byte, error) {
-	_, self, err := t.resolve(ctx)
+	_, self, err := t.resolveForEcho(ctx, metadata)
 	if err != nil {
 		return nil, err
 	}

@@ -104,10 +104,10 @@ func TestTailnetPeerDialCarriesTheRequestedHost(t *testing.T) {
 	}
 }
 
-// The name a connection asks for is not what the outbound resolves by today:
-// it asks the directory about its own configured peer. This is the behaviour a
-// by-name rule needs to change, so it is pinned here rather than assumed.
-func TestTailnetPeerResolvesByItsConfiguredName(t *testing.T) {
+// An echo is resolved by the name the flow carried, the way a dial is: an entry
+// that serves every device names no peer of its own, so resolving by the entry
+// alone would ask the directory with an empty id and be refused.
+func TestTailnetPeerResolvesAnEchoByTheRequestedName(t *testing.T) {
 	stub := &stubDirectory{ownID: "this-device", peerID: "pc", peerAddr: "2409:895a::1"}
 	server := stub.serve()
 	t.Cleanup(server.Close)
@@ -122,11 +122,11 @@ func TestTailnetPeerResolvesByItsConfiguredName(t *testing.T) {
 		DirectoryID:    "this-device",
 	})
 
-	host, self, err := peer.resolve(context.Background())
+	host, self, err := peer.resolveForEcho(context.Background(), &C.Metadata{Host: "pc.lan"})
 	if err != nil || self {
-		t.Fatalf("resolve = %q self=%v err=%v", host, self, err)
+		t.Fatalf("resolveForEcho = %q self=%v err=%v", host, self, err)
 	}
 	if host != "2409:895a::1" {
-		t.Fatalf("resolve = %q, want the peer's recorded address", host)
+		t.Fatalf("resolveForEcho = %q, want the peer's recorded address", host)
 	}
 }

@@ -297,10 +297,13 @@ func (t *TailnetPeer) directoryNameKey() string {
 	return t.option.Peer
 }
 
-// resolve answers where the configured peer is. It is the form used when a
-// caller has no name to resolve by (the mesh entry resolves per connection).
-func (t *TailnetPeer) resolve(ctx context.Context) (host string, self bool, err error) {
-	host, _, self, err = t.resolveFor(ctx, "")
+// resolveForEcho answers where an echo aimed at this outbound has to travel.
+// It asks by the name the flow carried, the same way a dial does, because an
+// entry that serves every device (the mesh entry) names no peer of its own:
+// resolving by the entry alone would ask the directory with an empty id and be
+// refused, which is what left a ping unanswered while a connection worked.
+func (t *TailnetPeer) resolveForEcho(ctx context.Context, metadata *C.Metadata) (host string, self bool, err error) {
+	host, _, self, err = t.resolveFor(ctx, requestedHost(metadata))
 	return host, self, err
 }
 
