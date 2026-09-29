@@ -23,6 +23,7 @@ import (
 	"github.com/metacubex/mihomo/component/cidr"
 	"github.com/metacubex/mihomo/component/fakeip"
 	"github.com/metacubex/mihomo/component/geodata"
+	"github.com/metacubex/mihomo/component/hubprofile"
 	"github.com/metacubex/mihomo/component/process"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/sniffer"
@@ -455,7 +456,12 @@ type RawConfig struct {
 	// Mesh is the shared half of a set of peer-directory devices: it expands to
 	// one tailnet-peer outbound per device (see mesh.go), so `proxies` keeps
 	// holding only what a profile defines by hand.
-	Mesh         *RawMesh            `yaml:"mesh,omitempty" json:"mesh,omitempty"`
+	Mesh *RawMesh `yaml:"mesh,omitempty" json:"mesh,omitempty"`
+	// Hub keeps this device's configuration in step with the hub that owns
+	// it: pulled at start, pushed when the dashboard saves. A device that
+	// runs this core without an app has no other way to be given a
+	// configuration - the file is read once and never again.
+	Hub *hubprofile.Config `yaml:"hub,omitempty" json:"hub,omitempty"`
 	Proxy        []map[string]any    `yaml:"proxies" json:"proxies"`
 	ProxyGroup   []map[string]any    `yaml:"proxy-groups" json:"proxy-groups"`
 	Rule         []string            `yaml:"rules" json:"rule"`

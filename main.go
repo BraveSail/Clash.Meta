@@ -16,9 +16,11 @@ import (
 	"syscall"
 
 	"github.com/metacubex/mihomo/common/cmd"
+	"github.com/metacubex/mihomo/common/yaml"
 	"github.com/metacubex/mihomo/component/age"
 	"github.com/metacubex/mihomo/component/generator"
 	"github.com/metacubex/mihomo/component/geodata"
+	"github.com/metacubex/mihomo/component/hubprofile"
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
 	C "github.com/metacubex/mihomo/constant"
@@ -236,6 +238,13 @@ func main() {
 
 	defer executor.Shutdown()
 
+	// A device that names a hub takes its configuration from there and keeps
+	// taking it: pulled now, and pushed when the dashboard saves. Without this
+	// the core reads its file once, so a box running it alone - an ONT, a
+	// router - could only be reconfigured by hand and by restart.
+	stopProfile := startHubProfile()
+	defer stopProfile()
+
 	termSign := make(chan os.Signal, 1)
 	hupSign := make(chan os.Signal, 1)
 	signal.Notify(termSign, syscall.SIGINT, syscall.SIGTERM)
@@ -250,4 +259,71 @@ func main() {
 			}
 		}
 	}
+}
+
+// startHubProfile puts the hub channel into service when the configuration
+// that was just loaded asks for one, and returns how to stop it.
+//
+// The YAML it receives is parsed and switched in through the executor, the
+// same way any other configuration change is, so a pushed profile takes effect
+// exactly as the app's own updates do.
+func startHubProfile() func() {
+	block := hubBlockFromConfig()
+	if !block.Enabled() {
+		return func() {}
+	}
+	if err := block.Validate(); err != nil {
+		log.Warnln("[Profile] the hub block is incomplete, staying on the file: %s", err.Error())
+		return func() {}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client, err := hubprofile.New(*block, func(pulled []byte) error {
+		// ParseWithBytes, not hub.Parse: the pulled YAML is a whole
+		// configuration, and hub.Parse would read it from the file this one is
+		// being written beside.
+		parsed, err := executor.ParseWithBytes(pulled)
+		if err != nil {
+			return err
+		}
+		hub.ApplyConfig(parsed)
+		return nil
+	})
+	if err != nil {
+		log.Warnln("[Profile] %s", err.Error())
+		cancel()
+		return func() {}
+	}
+	log.Infoln("[Profile] this device takes its configuration from %s as %q", block.URL, block.ID)
+	client.Start(ctx)
+	return cancel
+}
+
+// hubBlockFromConfig reads the hub block out of the configuration the core was
+// started with - from the bytes when they were given inline, and from the file
+// otherwise.
+//
+// It is read from the raw configuration rather than the parsed one: the parsed
+// configuration keeps only what the core runs, and this block describes how the
+// core is to be kept up to date, which is not part of that.
+func hubBlockFromConfig() *hubprofile.Config {
+	if len(configBytes) != 0 {
+		var raw config.RawConfig
+		if err := yaml.Unmarshal(configBytes, &raw); err != nil {
+			log.Debugln("[Profile] the configuration could not be read for a hub block: %s", err.Error())
+			return nil
+		}
+		return raw.Hub
+	}
+	buf, err := os.ReadFile(C.Path.Config())
+	if err != nil {
+		log.Debugln("[Profile] the configuration file could not be read for a hub block: %s", err.Error())
+		return nil
+	}
+	var raw config.RawConfig
+	if err := yaml.Unmarshal(buf, &raw); err != nil {
+		log.Debugln("[Profile] the configuration file could not be read for a hub block: %s", err.Error())
+		return nil
+	}
+	return raw.Hub
 }
