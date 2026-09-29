@@ -831,3 +831,58 @@ func TestExpandMeshDropsAnInvalidDomainRatherThanTheProfile(t *testing.T) {
 	assert.Equal(t, []string{"DOMAIN,gt7.lan,mesh"}, rawCfg.Rule)
 	assert.Equal(t, map[string]string{"gt7.lan": "0f1e2d3c4b5a"}, rawCfg.Proxy[len(rawCfg.Proxy)-1]["domains"])
 }
+
+// Each device serves where its own entry says, and dials every peer where that
+// peer's entry says: the ports are per device, so a device whose port collides
+// with something the host already runs moves on its own while the others keep
+// the port they had.
+func TestExpandMeshGivesEachDeviceItsOwnPort(t *testing.T) {
+	rawCfg := discoveredMesh([]RawMeshDevice{
+		{Name: "pc", ID: "this-device", Port: 23334, Domain: "pc.lan"},
+		{Name: "gt7", ID: "0f1e2d3c4b5a", Port: 8443, Domain: "gt7.lan"},
+		{Name: "router", ID: "cccc3333", Port: 23333, Domain: "router.lan"},
+	})
+	rawCfg.Mesh.DirectoryResolved = true
+
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatalf("ports that differ per device failed the parse: %v", err)
+	}
+
+	// This device serves where its own entry says, not on the default and not
+	// on what any other entry names.
+	assert.Equal(t, 23334, rawCfg.Listeners[0]["port"])
+
+	portsByID := map[string]any{}
+	for _, proxy := range rawCfg.Proxy {
+		if id, ok := proxy["directory-peer"].(string); ok {
+			portsByID[id] = proxy["port"]
+		}
+	}
+	assert.Equal(t, 23334, portsByID["this-device"])
+	assert.Equal(t, 8443, portsByID["0f1e2d3c4b5a"])
+	assert.Equal(t, 23333, portsByID["cccc3333"])
+
+	// The shared entry the domain rules point at answers back at this device's
+	// own service port.
+	shared := rawCfg.Proxy[len(rawCfg.Proxy)-1]
+	assert.Equal(t, meshEntryName, shared["name"])
+	assert.Equal(t, 23334, shared["port"])
+}
+
+// A profile that names no directory-id cannot say which entry is its own, so
+// the entries have to agree - the rule a profile written before the id
+// travelled in the block relies on.
+func TestExpandMeshRefusesDisagreeingPortsWithoutAnId(t *testing.T) {
+	rawCfg := discoveredMesh([]RawMeshDevice{
+		{Name: "pc", ID: "aaaa1111", Port: 8443},
+		{Name: "gt7", ID: "bbbb2222", Port: 23333},
+	})
+	rawCfg.Mesh.DirectoryID = ""
+	rawCfg.Mesh.DirectoryResolved = true
+
+	err := expandMesh(rawCfg)
+	if err == nil {
+		t.Fatal("a profile that cannot say which entry is its own accepted disagreeing ports")
+	}
+	assert.Contains(t, err.Error(), "directory-id")
+}

@@ -235,7 +235,7 @@ func expandMesh(rawCfg *RawConfig) error {
 		domains[peer.Domain] = peer.ID
 	}
 	if len(domains) > 0 {
-		rawCfg.Proxy = append(rawCfg.Proxy, buildMeshEntry(mesh, domains))
+		rawCfg.Proxy = append(rawCfg.Proxy, buildMeshEntry(mesh, domains, port))
 		// The rules go first so a domain the user also wrote by hand - a
 		// geosite entry, a catch-all - cannot shadow the mesh.
 		rawCfg.Rule = append(buildMeshDomainRules(domains), rawCfg.Rule...)
@@ -262,11 +262,11 @@ func expandMesh(rawCfg *RawConfig) error {
 // buildMeshEntry is the outbound a profile's mesh rules point at: it answers
 // whichever device the requested name belongs to, so one rule covers every
 // device and no device has to be named in the profile.
-func buildMeshEntry(mesh *RawMesh, domains map[string]string) map[string]any {
+func buildMeshEntry(mesh *RawMesh, domains map[string]string, port int) map[string]any {
 	mapping := map[string]any{
 		"name":          meshEntryName,
 		"type":          "tailnet-peer",
-		"port":          meshDefaultPort,
+		"port":          port,
 		"directory-url": mesh.DirectoryURL,
 		"proxy":         mesh.Proxy,
 		"domains":       domains,
@@ -420,7 +420,13 @@ func meshPeers(mesh *RawMesh, port int) (peers []meshPeer, discovered bool, err 
 				log.Warnln("[Mesh] device %q carries domain %q, which is not a dns name; it will not be reached by that name", name, device.Domain)
 				domain = ""
 			}
-			peers = append(peers, meshPeer{Name: name, ID: id, Port: port, Domain: domain})
+			// Each device is dialled where its own entry says it serves; an
+			// entry that names no port takes the one the profile settled on.
+			peerPort := device.Port
+			if peerPort < 1 || peerPort > 65535 {
+				peerPort = port
+			}
+			peers = append(peers, meshPeer{Name: name, ID: id, Port: peerPort, Domain: domain})
 		}
 		return peers, false, nil
 	}
@@ -525,14 +531,17 @@ func buildMeshListener(source map[string]any, port int) map[string]any {
 	return listener
 }
 
-// meshPort reads the port from the device entries: the port is written on the
-// device it belongs to, one port for all of them, and it is both the port this
-// device serves on and the port every peer is dialled at.
+// meshPort reads this device's port: the device entry carrying this device's
+// directory id names the port it serves on, and every other entry names the
+// port it is dialled at. A profile that does not say which entry is its own -
+// one written before the id travelled in the block - names the port on every
+// entry instead, and then they have to agree, because nothing else says which
+// one is this device.
 func meshPort(mesh *RawMesh) (int, error) {
 	if _, ok := mesh.Listener["port"]; ok {
 		return 0, errors.New("mesh: put the port on the device entries, not on the listener")
 	}
-	port := 0
+	fallback := 0
 	for index, device := range mesh.Devices {
 		if device.Port == 0 {
 			continue
@@ -540,13 +549,18 @@ func meshPort(mesh *RawMesh) (int, error) {
 		if device.Port < 1 || device.Port > 65535 {
 			return 0, fmt.Errorf("mesh device %d: invalid port %d", index, device.Port)
 		}
-		if port != 0 && device.Port != port {
-			return 0, fmt.Errorf("mesh device %d: port %d differs from the other devices' port %d; a device reports one port to the directory", index, device.Port, port)
+		if mesh.DirectoryID != "" && device.ID == mesh.DirectoryID {
+			// This entry is this device: its port is the one this device
+			// serves on, and the others' are the ports it dials them at.
+			return device.Port, nil
 		}
-		port = device.Port
+		if fallback != 0 && device.Port != fallback {
+			return 0, fmt.Errorf("mesh device %d: port %d differs from the other devices' port %d; put directory-id in the block to give each device its own port", index, device.Port, fallback)
+		}
+		fallback = device.Port
 	}
-	if port == 0 {
-		port = meshDefaultPort
+	if fallback == 0 {
+		fallback = meshDefaultPort
 	}
-	return port, nil
+	return fallback, nil
 }
