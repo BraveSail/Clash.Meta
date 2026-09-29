@@ -318,7 +318,10 @@ func TestExpandMeshDiscoversTheDevicesFromTheDirectory(t *testing.T) {
 	// The lookup is by id, not by name: a device renamed on the dashboard
 	// still resolves, and two devices cannot collide over a name.
 	assert.Equal(t, "a1b2c3d4e5f6", pc["directory-peer"])
-	assert.Equal(t, 8443, pc["port"])
+	// The port on the entry is this device's, not the peer's: the entry's
+	// directory half reports where THIS device is, and the peer's own port
+	// travels in the directory record it is dialled from.
+	assert.Equal(t, meshDefaultPort, pc["port"])
 	assert.Equal(t, "https://hub.example", pc["directory-url"])
 	assert.Equal(t, "secret", pc["directory-token"])
 	assert.Equal(t, "this-device", pc["directory-id"])
@@ -328,9 +331,8 @@ func TestExpandMeshDiscoversTheDevicesFromTheDirectory(t *testing.T) {
 	gt7 := discoveredProxy(t, rawCfg, "0f1e2d3c4b5a")
 	assert.Equal(t, "gt7", gt7["name"])
 	assert.Equal(t, "0f1e2d3c4b5a", gt7["directory-peer"])
-	// The port is the device's own: a mesh that discovers its devices takes
-	// each one as the directory recorded it.
-	assert.Equal(t, 9443, gt7["port"])
+	// A device that reported 9443 does not make this device serve on 9443.
+	assert.Equal(t, meshDefaultPort, gt7["port"])
 }
 
 // discoveredProxy answers the outbound expanded for one directory record.
@@ -630,8 +632,11 @@ func TestExpandMeshKeepsAWrittenProtocol(t *testing.T) {
 	assert.Empty(t, rawCfg.Listeners)
 }
 
-// A device need not serve on the default port: the port its record carries is
-// the one it is dialled at, and a record without one takes the default.
+// A device need not serve on the default port, but what a discovered device's
+// record says is where THAT device is dialled - it is not this device's port,
+// and the entry must not carry it as one: the entry's directory half reports
+// the port this device serves on, and publishing a peer's port there makes
+// every other device dial a port nothing binds.
 func TestExpandMeshUsesEachDiscoveredDevicePort(t *testing.T) {
 	stubDiscovery(t, []outbound.DirectoryNode{
 		{ID: "aaaa1111", Name: "pc", Port: 9443},
@@ -643,11 +648,13 @@ func TestExpandMeshUsesEachDiscoveredDevicePort(t *testing.T) {
 	if err := expandMesh(rawCfg); err != nil {
 		t.Fatal(err)
 	}
-	assert.Equal(t, 9443, rawCfg.Proxy[0]["port"])
+	// Every entry carries THIS device's port, because it is also the port the
+	// entry's directory half reports: taking the peer's port here published
+	// the peer's port as this device's own. Which peer is dialled where comes
+	// from the directory at dial time, not from the entry.
+	assert.Equal(t, meshDefaultPort, rawCfg.Proxy[0]["port"])
 	assert.Equal(t, meshDefaultPort, rawCfg.Proxy[1]["port"])
 	assert.Equal(t, meshDefaultPort, rawCfg.Proxy[2]["port"])
-	// The listener this device serves takes the default: the mesh no longer
-	// settles on one port for everyone.
 	assert.Equal(t, meshDefaultPort, rawCfg.Listeners[0]["port"])
 }
 
@@ -852,15 +859,18 @@ func TestExpandMeshGivesEachDeviceItsOwnPort(t *testing.T) {
 	// on what any other entry names.
 	assert.Equal(t, 23334, rawCfg.Listeners[0]["port"])
 
-	portsByID := map[string]any{}
+	// Each entry carries THIS device's port - it is what the entry's directory
+	// half reports - and the peer's own port is read from the directory when
+	// the connection is dialled.
+	ports := map[string]any{}
 	for _, proxy := range rawCfg.Proxy {
 		if id, ok := proxy["directory-peer"].(string); ok {
-			portsByID[id] = proxy["port"]
+			ports[id] = proxy["port"]
 		}
 	}
-	assert.Equal(t, 23334, portsByID["this-device"])
-	assert.Equal(t, 8443, portsByID["0f1e2d3c4b5a"])
-	assert.Equal(t, 23333, portsByID["cccc3333"])
+	assert.Equal(t, 23334, ports["this-device"])
+	assert.Equal(t, 23334, ports["0f1e2d3c4b5a"])
+	assert.Equal(t, 23334, ports["cccc3333"])
 
 	// The shared entry the domain rules point at answers back at this device's
 	// own service port.

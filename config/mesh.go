@@ -192,7 +192,11 @@ func expandMesh(rawCfg *RawConfig) error {
 			"name":          peer.Name,
 			"type":          "tailnet-peer",
 			"peer":          peer.Name,
-			"port":          peer.Port,
+			// This entry dials the peer, but its directory half reports where
+			// THIS device is: the port on the entry is the peer's, so taking
+			// it here published the peer's port as this device's own and every
+			// other device dialled a port this one does not bind.
+			"port":          port,
 			"directory-url": mesh.DirectoryURL,
 			"proxy":         mesh.Proxy,
 		}
