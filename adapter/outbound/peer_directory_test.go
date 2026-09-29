@@ -443,3 +443,25 @@ func TestPeerDirectoryReachesTheDirectoryThroughItsProxy(t *testing.T) {
 		t.Fatal("the report never reached the proxy")
 	}
 }
+
+// A directory that names no port reports the default, and that default has to
+// be the port the mesh listens on: a report of any other value points every
+// peer at a port nothing binds, and the failure shows up on the peer while
+// this device looks healthy.
+func TestPeerDirectoryReportsTheMeshDefaultPortWithoutOne(t *testing.T) {
+	if peerDirectoryDefaultPort != 23333 {
+		t.Fatalf("peerDirectoryDefaultPort = %d, want the mesh default 23333", peerDirectoryDefaultPort)
+	}
+	node, err := NewPeerDirectory(PeerDirectoryOption{
+		Name: "test",
+		URL:  "https://directory.example",
+		ID:   "a1b2c3d4e5f6",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = node.Close() }()
+	if node.option.Port != peerDirectoryDefaultPort {
+		t.Fatalf("a directory without a port reported %d, want %d", node.option.Port, peerDirectoryDefaultPort)
+	}
+}

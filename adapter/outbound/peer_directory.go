@@ -34,7 +34,10 @@ import (
 var localAddresses = localAddressesByInterface
 
 const (
-	peerDirectoryDefaultPort    = 8443
+	// The port a peer-directory reports when the profile names none: the same
+	// value the mesh block falls back to, because an entry that reports a port
+	// nobody listens on is worse than one that reports the default.
+	peerDirectoryDefaultPort    = 23333
 	peerDirectoryDefaultRefresh = 30 * time.Second
 	peerDirectoryDefaultTimeout = 10 * time.Second
 	peerDirectoryLookupTTL      = 2 * time.Second
