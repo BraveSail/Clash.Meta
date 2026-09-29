@@ -132,11 +132,27 @@ type ApplyFunc func(yaml []byte) error
 type Client struct {
 	config Config
 	apply  ApplyFunc
-	client *http.Client
+	// direct reaches the hub straight out; through reaches it by way of the
+	// configured proxy. Both are tried, direct first, so a hub that is only
+	// reachable one way is still reachable and a device never depends on the
+	// path it may be about to install. Either may be nil when that way is not
+	// available at all.
+	direct  *http.Client
+	through *http.Client
+	// dialDirect and dialThrough are the same two ways for the watch socket,
+	// which dials a connection rather than going through a transport.
+	dialDirect  func(ctx context.Context, network, address string) (net.Conn, error)
+	dialThrough func(ctx context.Context, network, address string) (net.Conn, error)
+	// proxyConfigured records whether a proxy was asked for, so the failure
+	// message can say which paths were tried.
+	proxyConfigured bool
 
 	mu      sync.Mutex
 	etag    string
 	lastErr error
+	// wayIndex is the route the last success came over, so the walk starts
+	// where the hub was last reachable.
+	wayIndex int
 }
 
 // New builds a client. apply is called for every YAML that differs from the
@@ -145,15 +161,54 @@ func New(config Config, apply ApplyFunc) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	transport, err := transportFor(config.Proxy)
-	if err != nil {
-		return nil, err
+
+	client := &Client{config: config, apply: apply}
+	client.dialDirect = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, address)
 	}
-	return &Client{
-		config: config,
-		apply:  apply,
-		client: &http.Client{Timeout: fetchTimeout, Transport: transport},
-	}, nil
+	client.direct = &http.Client{
+		Timeout:   fetchTimeout,
+		Transport: transportFor(nil),
+	}
+
+	if proxy := strings.TrimSpace(config.Proxy); proxy != "" {
+		tunnel, err := newProxyDialer(proxy)
+		if err != nil {
+			return nil, err
+		}
+		client.proxyConfigured = true
+		client.dialThrough = tunnel.DialContext
+		client.through = &http.Client{
+			Timeout:   fetchTimeout,
+			Transport: transportFor(tunnel.DialContext),
+		}
+	}
+	return client, nil
+}
+
+// ways lists the routes to the hub in the order they are tried.
+//
+// Direct first, deliberately. A device pulls its configuration to find out what
+// it should run - including the proxy that configuration may install - so the
+// first attempt must not depend on that proxy: a device whose only route out is
+// the proxy it has not yet been told about would otherwise never be told. The
+// direct attempt costs one connection when it works, and when the network
+// resets it the proxy attempt follows.
+func (c *Client) ways() []way {
+	ways := []way{{name: "direct", client: c.direct, dial: c.dialDirect}}
+	if c.through != nil {
+		ways = append(ways, way{name: "proxy", client: c.through, dial: c.dialThrough})
+	}
+	return ways
+}
+
+// way is one route to the hub: the client the pull goes through and the dialer
+// the socket uses, which have to agree or the two halves would take different
+// paths.
+type way struct {
+	name   string
+	client *http.Client
+	dial   func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 // Start runs the channel until ctx is done: a pull first, then the socket with
@@ -188,13 +243,16 @@ func (c *Client) pollLoop(ctx context.Context) {
 
 // watchLoop holds the hub's socket and reapplies whatever it hands over,
 // backing off when it cannot be held.
+//
+// The routes are walked in the same order the pull uses, so a device whose
+// socket cannot be held one way still hears its pushes the other.
 func (c *Client) watchLoop(ctx context.Context) {
 	backoff := retryFloor
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		err := c.watch(ctx)
+		err := c.watchAllWays(ctx)
 		if ctx.Err() != nil {
 			return
 		}
@@ -218,8 +276,31 @@ func (c *Client) watchLoop(ctx context.Context) {
 	}
 }
 
+// watchAllWays holds the socket over whichever route can carry it.
+func (c *Client) watchAllWays(ctx context.Context) error {
+	ways := c.ways()
+	start := c.preferredWay()
+	var lastErr error
+	for i := 0; i < len(ways); i++ {
+		index := (start + i) % len(ways)
+		err := c.watch(ctx, ways[index])
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err == nil {
+			c.rememberWay(index)
+			return nil
+		}
+		lastErr = err
+		if len(ways) > 1 {
+			log.Debugln("[Profile] watch over %s ended: %s", ways[index].name, err.Error())
+		}
+	}
+	return lastErr
+}
+
 // watch is one connection's lifetime: dial, read messages, apply each one.
-func (c *Client) watch(ctx context.Context) error {
+func (c *Client) watch(ctx context.Context, attempt way) error {
 	target, err := c.watchURL()
 	if err != nil {
 		return err
@@ -227,11 +308,11 @@ func (c *Client) watch(ctx context.Context) error {
 	header := ws.HandshakeHeaderHTTP(http.Header{
 		"Authorization": []string{"Bearer " + c.config.Token},
 	})
-	// The core's own dialer, so reaching the hub does not depend on the tunnel
-	// the configuration being fetched would build.
-	conn, _, _, err := ws.Dialer{Header: header, NetDial: c.dialContext}.Dial(ctx, target)
+	// The core's own dialer, or the tunnel, so reaching the hub does not
+	// depend on the tunnel the configuration being fetched would build.
+	conn, _, _, err := ws.Dialer{Header: header, NetDial: attempt.dial}.Dial(ctx, target)
 	if err != nil {
-		return fmt.Errorf("profile: watch dial %s: %w", target, err)
+		return fmt.Errorf("profile: watch dial %s over %s: %w", target, attempt.name, err)
 	}
 	defer func() {
 		_ = conn.Close()
@@ -241,7 +322,7 @@ func (c *Client) watch(ctx context.Context) error {
 		return err
 	}
 	c.clearErr()
-	log.Infoln("[Profile] watching %s", target)
+	log.Infoln("[Profile] watching %s (over %s)", target, attempt.name)
 
 	for {
 		if ctx.Err() != nil {
@@ -300,11 +381,46 @@ func (c *Client) handleMessage(data []byte) error {
 
 // Pull reads the profile once and applies it when it differs from the running
 // one. A 304 is a success with nothing to do.
+//
+// Both ways to the hub are tried in turn, so one route being down does not take
+// the profile away. The attempt that succeeds is remembered, and the next pull
+// starts there: a device on a network that only reaches the proxy should not
+// pay a failed direct attempt on every poll.
 func (c *Client) Pull(ctx context.Context) error {
 	target, err := c.profileURL()
 	if err != nil {
 		return err
 	}
+	ways := c.ways()
+	start := c.preferredWay()
+	var lastErr error
+	for i := 0; i < len(ways); i++ {
+		attempt := ways[(start+i)%len(ways)]
+		err := c.pullVia(ctx, attempt, target)
+		if err == nil {
+			c.rememberWay((start + i) % len(ways))
+			return nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+		// An answer from the hub is not a route problem: the other way would
+		// ask the same question and be told the same thing.
+		var answered wayAnswered
+		if errors.As(err, &answered) {
+			break
+		}
+		if len(ways) > 1 {
+			log.Debugln("[Profile] pull over %s failed: %s", attempt.name, err.Error())
+		}
+	}
+	c.setErr(lastErr)
+	return lastErr
+}
+
+// pullVia is one attempt over one route.
+func (c *Client) pullVia(ctx context.Context, attempt way, target string) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return err
@@ -317,10 +433,9 @@ func (c *Client) Pull(ctx context.Context) error {
 		request.Header.Set("If-None-Match", etag)
 	}
 
-	response, err := c.client.Do(request)
+	response, err := attempt.client.Do(request)
 	if err != nil {
-		c.setErr(err)
-		return fmt.Errorf("profile: pull %s: %w", target, err)
+		return fmt.Errorf("profile: pull %s over %s: %w", target, attempt.name, err)
 	}
 	defer func() {
 		_ = response.Body.Close()
@@ -328,28 +443,22 @@ func (c *Client) Pull(ctx context.Context) error {
 
 	switch response.StatusCode {
 	case http.StatusNotModified:
-		c.clearErr()
 		return nil
 	case http.StatusNotFound:
-		err := fmt.Errorf("profile: the hub holds no profile for id %q", c.config.ID)
-		c.setErr(err)
-		return err
+		return fmt.Errorf("profile: the hub holds no profile for id %q", c.config.ID)
 	case http.StatusOK:
 	default:
-		err := fmt.Errorf("profile: pull %s: the hub answered %s", target, response.Status)
-		c.setErr(err)
-		return err
+		// The hub answered, so this route works: a status is not a reason to
+		// try the other one, which would only repeat the same answer.
+		return wayAnswered{err: fmt.Errorf("profile: pull %s over %s: the hub answered %s", target, attempt.name, response.Status)}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxProfileLen+1))
 	if err != nil {
-		c.setErr(err)
-		return err
+		return fmt.Errorf("profile: pull %s over %s: %w", target, attempt.name, err)
 	}
 	if len(body) > maxProfileLen {
-		err := fmt.Errorf("profile: the pulled profile is larger than %d bytes", maxProfileLen)
-		c.setErr(err)
-		return err
+		return wayAnswered{err: fmt.Errorf("profile: the pulled profile is larger than %d bytes", maxProfileLen)}
 	}
 
 	responseEtag := strings.TrimSpace(response.Header.Get("ETag"))
@@ -360,16 +469,36 @@ func (c *Client) Pull(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 	if same {
-		c.clearErr()
 		return nil
 	}
 	if err := c.applyYAML(body); err != nil {
-		c.setErr(err)
-		return err
+		return wayAnswered{err: err}
 	}
-	c.clearErr()
-	log.Infoln("[Profile] applied the profile pulled from the hub (etag %s)", responseEtag)
+	log.Infoln("[Profile] applied the profile pulled over %s (etag %s)", attempt.name, responseEtag)
 	return nil
+}
+
+// wayAnswered marks a failure that came from the hub's own answer rather than
+// from the route. Trying the other way would only produce the same answer -
+// the hub would refuse the credential again, or hold no profile again - so
+// these stop the walk, while a route that cannot be reached does not.
+type wayAnswered struct{ err error }
+
+func (w wayAnswered) Error() string { return w.err.Error() }
+func (w wayAnswered) Unwrap() error { return w.err }
+
+// preferredWay is the route the last success came over.
+func (c *Client) preferredWay() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.wayIndex
+}
+
+func (c *Client) rememberWay(index int) {
+	c.mu.Lock()
+	c.wayIndex = index
+	c.lastErr = nil
+	c.mu.Unlock()
 }
 
 // applyYAML merges the device's own identity in, writes the result beside the
@@ -492,42 +621,23 @@ func (c *Client) watchURL() (string, error) {
 	return parsed.String(), nil
 }
 
-// dialContext uses the core's dialer, so a hub that is only reachable through
-// the tunnel is still reachable, and a configuration fetched from it cannot
-// depend on the configuration it would install.
-func (c *Client) dialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	return dialer.DialContext(ctx, network, address)
-}
-
-// transportFor builds the transport the pull goes through, optionally by way
-// of a proxy for a network that resets the direct connection.
-func transportFor(rawProxy string) (*http.Transport, error) {
-	transport := &http.Transport{
+// transportFor builds the transport a request goes over, dialling with the
+// given function. The dialer is passed in rather than chosen here so the pull
+// and the watch socket can be given the same route.
+func transportFor(dial func(ctx context.Context, network, address string) (net.Conn, error)) *http.Transport {
+	if dial == nil {
+		dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
+		}
+	}
+	return &http.Transport{
 		MaxIdleConns:          4,
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		DisableCompression:    true,
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, address)
-		},
+		DialContext:           dial,
 	}
-	rawProxy = strings.TrimSpace(rawProxy)
-	if rawProxy == "" {
-		return transport, nil
-	}
-	parsed, err := url.Parse(rawProxy)
-	if err != nil {
-		return nil, fmt.Errorf("profile: invalid proxy url %q: %w", rawProxy, err)
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("profile: proxy url %q must be http or https", rawProxy)
-	}
-	if parsed.Host == "" {
-		return nil, fmt.Errorf("profile: proxy url %q names no host", rawProxy)
-	}
-	transport.Proxy = http.ProxyURL(parsed)
-	return transport, nil
 }
 
 func (c *Client) setErr(err error) {
