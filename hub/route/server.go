@@ -568,5 +568,13 @@ func getLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func version(w http.ResponseWriter, r *http.Request) {
-	render.JSON(w, r, render.M{"meta": C.Meta, "version": C.Version})
+	// The build time and the revision travel with the version: a mesh whose
+	// nodes disagree about either fails in the handshake and says nothing, so
+	// the app shows what each device actually runs.
+	render.JSON(w, r, render.M{
+		"meta":      C.Meta,
+		"version":   C.Version,
+		"buildTime": C.BuildTime,
+		"revision":  C.Revision,
+	})
 }
