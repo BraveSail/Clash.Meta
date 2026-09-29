@@ -235,7 +235,12 @@ func (t *TailnetPeer) dialLocalService(ctx context.Context, metadata *C.Metadata
 		return nil, errors.New("tailnet-peer: no port to dial on this node")
 	}
 	var lastErr error
-	for _, loopback := range []netip.Addr{netip.MustParseAddr("::1"), netip.MustParseAddr("127.0.0.1")} {
+	// IPv4 first: a box's web server commonly binds only its LAN address, and
+	// the loopback that answers is then 127.0.0.1 - reaching it through the
+	// NAT rule the box already carries. Trying ::1 first made every connection
+	// to such a service wait out a refused IPv6 connect, which on this box was
+	// an extra second per request; the connection itself took milliseconds.
+	for _, loopback := range []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1")} {
 		local := *metadata
 		local.Host = ""
 		local.DstIP = loopback
