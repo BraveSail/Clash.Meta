@@ -205,6 +205,37 @@ func TestAnEmptyBlockIsNotEnabled(t *testing.T) {
 	}
 }
 
+// A single link is what a user is given, so the credential may arrive inside the
+// address instead of its own field - and the address must come out clean, because
+// the endpoints are built by appending a path to it.
+func TestTheCredentialMayArriveInsideTheUrl(t *testing.T) {
+	linked := Config{URL: "https://hub.example/?token=secret", ID: "x"}
+	if err := linked.Validate(); err != nil {
+		t.Fatalf("a url carrying the token did not validate: %v", err)
+	}
+	if linked.Token != "secret" {
+		t.Fatalf("token = %q, want the one carried in the url", linked.Token)
+	}
+	if strings.Contains(linked.URL, "token=") || strings.Contains(linked.URL, "?") {
+		t.Fatalf("url = %q, want no query left", linked.URL)
+	}
+
+	// An explicit token still wins, so a configured credential is never
+	// silently replaced by whatever the address happens to carry.
+	both := Config{URL: "https://hub.example/?token=from-link", Token: "from-field", ID: "x"}
+	if err := both.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if both.Token != "from-field" {
+		t.Fatalf("token = %q, want the configured one", both.Token)
+	}
+
+	// And a link with no token is still an incomplete block.
+	if err := (&Config{URL: "https://hub.example", ID: "x"}).Validate(); err == nil {
+		t.Error("a block with no credential anywhere validated")
+	}
+}
+
 // The identity fields survive a profile shared with other devices: the hub
 // stores one YAML, so what says which device this is has to be merged in after.
 func TestKeepOverridesThePulledProfile(t *testing.T) {

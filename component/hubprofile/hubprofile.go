@@ -92,12 +92,27 @@ func (c *Config) Enabled() bool {
 		strings.TrimSpace(c.ID) != "")
 }
 
+// hubTokenParam is the query parameter an address may carry its credential in,
+// mirroring what the hub accepts on the other end.
+const hubTokenParam = "token"
+
 // Validate reports whether the block can be used, before anything is dialled:
 // a device that names no hub has nothing to pull from, and one that names no
 // id has no record to be given.
+//
+// The credential may arrive either in its own field or inside the url, so a
+// single link can configure this block the same way it configures a device's
+// directory outbound. The url form is the one that cannot drift: an address and
+// the token it belongs to are written and replaced together.
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.URL) == "" {
 		return errors.New("profile: url is required, the hub this device takes its configuration from")
+	}
+	if token, stripped := splitHubLink(c.URL); token != "" {
+		if strings.TrimSpace(c.Token) == "" {
+			c.Token = token
+		}
+		c.URL = stripped
 	}
 	if strings.TrimSpace(c.Token) == "" {
 		return errors.New("profile: token is required, the credential the hub accepts")
@@ -106,6 +121,29 @@ func (c *Config) Validate() error {
 		return errors.New("profile: id is required, the record this device answers to")
 	}
 	return nil
+}
+
+// splitHubLink lifts a credential out of an address that carries one as a
+// parameter, returning the address with the parameter removed. Callers build
+// their endpoints by appending a path to the address, so what they are given
+// must be free of a query; the token travels in the request header instead.
+func splitHubLink(raw string) (token string, stripped string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || !strings.Contains(trimmed, hubTokenParam+"=") {
+		return "", trimmed
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", trimmed
+	}
+	query := parsed.Query()
+	carried := strings.TrimSpace(query.Get(hubTokenParam))
+	if carried == "" {
+		return "", trimmed
+	}
+	query.Del(hubTokenParam)
+	parsed.RawQuery = query.Encode()
+	return carried, parsed.String()
 }
 
 // filePath is where the pulled YAML is written.
