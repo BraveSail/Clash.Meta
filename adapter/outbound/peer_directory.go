@@ -49,6 +49,34 @@ const (
 
 var peerDirectoryIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,63}$`)
 
+// directoryTokenParam is the query parameter a directory link carries its
+// token in, mirroring what the hub accepts.
+const directoryTokenParam = "token"
+
+// splitDirectoryURL lifts the credential out of a directory address that
+// carries one as a parameter. The caller appends its own paths by string
+// concatenation, so the address it is given has to be free of a query; the
+// token travels in the request header either way. An address with no such
+// parameter is returned untouched.
+func splitDirectoryURL(raw string) (token string, stripped string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || !strings.Contains(trimmed, directoryTokenParam+"=") {
+		return "", trimmed
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", trimmed
+	}
+	query := parsed.Query()
+	carried := strings.TrimSpace(query.Get(directoryTokenParam))
+	if carried == "" {
+		return "", trimmed
+	}
+	query.Del(directoryTokenParam)
+	parsed.RawQuery = query.Encode()
+	return carried, parsed.String()
+}
+
 // PeerDirectoryOption configures the directory outbound: it reports this node
 // under [ID] and answers where other ids are.
 type PeerDirectoryOption struct {
@@ -112,6 +140,18 @@ type cachedPeer struct {
 }
 
 func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
+	// The address a node is given may carry the credential as a parameter, so
+	// that one link configures the hub and the token together. The paths this
+	// type appends to it (`/report`, `/lookup`) are built by string
+	// concatenation, which a query would corrupt, so the token is lifted out
+	// here and carried as a header instead. A plain address with a token field
+	// keeps working unchanged.
+	if token, stripped := splitDirectoryURL(option.URL); token != "" {
+		if strings.TrimSpace(option.Token) == "" {
+			option.Token = token
+		}
+		option.URL = stripped
+	}
 	parsed, err := url.Parse(strings.TrimSpace(option.URL))
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return nil, fmt.Errorf("peer-directory: invalid url %q", option.URL)

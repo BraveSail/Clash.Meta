@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -351,6 +352,65 @@ func TestPeerDirectoryRejectsIncompleteOptions(t *testing.T) {
 	}
 	if _, err := NewPeerDirectory(PeerDirectoryOption{Name: "x", URL: "https://example.com", ID: "pc", Port: 70000}); err == nil {
 		t.Fatal("an invalid port was accepted")
+	}
+}
+
+func TestDirectoryURLTokenIsLiftedOutOfTheAddress(t *testing.T) {
+	// One link configures the hub and the credential together, so the token
+	// arrives inside the address. The paths this type appends are built by
+	// concatenation, so the stored address has to come out without the query.
+	token, stripped := splitDirectoryURL("https://hub.example/?token=secret")
+	if token != "secret" {
+		t.Fatalf("token = %q, want %q", token, "secret")
+	}
+	if stripped != "https://hub.example/" {
+		t.Fatalf("stripped = %q, want the address with no query", stripped)
+	}
+
+	// A token that travels in its own field is untouched, and the address still
+	// works when a link carries none.
+	if token, stripped := splitDirectoryURL("https://hub.example"); token != "" || stripped != "https://hub.example" {
+		t.Fatalf("a plain address was rewritten: %q %q", token, stripped)
+	}
+
+	// Any other parameter survives: only the credential is lifted.
+	_, stripped = splitDirectoryURL("https://hub.example/?id=pc&token=secret")
+	if stripped != "https://hub.example/?id=pc" {
+		t.Fatalf("stripped = %q, want the other parameters kept", stripped)
+	}
+}
+
+func TestNewPeerDirectoryTakesTheTokenFromTheAddress(t *testing.T) {
+	d, err := NewPeerDirectory(PeerDirectoryOption{
+		Name: "x",
+		URL:  "https://hub.example/?token=secret",
+		ID:   "pc",
+	})
+	if err != nil {
+		t.Fatalf("NewPeerDirectory: %v", err)
+	}
+	if d.option.Token != "secret" {
+		t.Fatalf("token = %q, want the one carried in the address", d.option.Token)
+	}
+	// The address the requests are built from must be free of a query, or
+	// `.../report` would be concatenated onto it and the report never arrive.
+	if strings.Contains(d.option.URL, "token=") || strings.Contains(d.option.URL, "?") {
+		t.Fatalf("url = %q, want no query left", d.option.URL)
+	}
+
+	// A token configured on its own wins, so an explicit setting is never
+	// silently overridden by whatever the address happens to carry.
+	d, err = NewPeerDirectory(PeerDirectoryOption{
+		Name:  "x",
+		URL:   "https://hub.example/?token=from-link",
+		Token: "from-field",
+		ID:    "pc",
+	})
+	if err != nil {
+		t.Fatalf("NewPeerDirectory: %v", err)
+	}
+	if d.option.Token != "from-field" {
+		t.Fatalf("token = %q, want the configured one", d.option.Token)
 	}
 }
 
