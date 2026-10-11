@@ -378,6 +378,15 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 	}
 	outbound.bind = wireguard.NewClientBind(context.Background(), wgSingErrorHandler{outbound.Name()}, singDialer, isConnect, outbound.connectAddr.AddrPort(), reserved)
 
+	// A bind that could not open its socket comes back nil, and every later
+	// use of it - SetConnectAddr, the device built on it - dereferences that
+	// nil. A network that refuses the socket (a flapping path, a route not
+	// yet up) is exactly when this happens, so the failure is reported here
+	// as a connection error instead of a crash down the line.
+	if outbound.bind == nil {
+		return nil, E.New("failed to create wireguard client bind")
+	}
+
 	var err error
 	outbound.localPrefixes, err = option.Prefixes()
 	if err != nil {
