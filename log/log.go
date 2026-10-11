@@ -3,6 +3,7 @@ package log
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 
 	"github.com/metacubex/mihomo/common/observable"
 
@@ -12,7 +13,12 @@ import (
 var (
 	logCh  = make(chan Event)
 	source = observable.NewObservable[Event](logCh)
-	level  = INFO
+	// level is read by every log line and written by every configuration
+	// apply, on different goroutines: a hub channel reporting while the
+	// configuration is reloaded interleaves the two. It is atomic because a
+	// concurrent read and write of it is a data race, which the runtime
+	// reports - and can tear - no matter how briefly the window lasts.
+	level atomic.Int32
 )
 
 func init() {
@@ -23,6 +29,7 @@ func init() {
 		TimestampFormat:           "2006-01-02T15:04:05.000000000Z07:00",
 		EnvironmentOverrideColors: true,
 	})
+	level.Store(int32(INFO))
 }
 
 type Event struct {
@@ -72,15 +79,15 @@ func UnSubscribe(sub observable.Subscription[Event]) {
 }
 
 func Level() LogLevel {
-	return level
+	return LogLevel(level.Load())
 }
 
 func SetLevel(newLevel LogLevel) {
-	level = newLevel
+	level.Store(int32(newLevel))
 }
 
 func print(data Event) {
-	if data.LogLevel < level {
+	if data.LogLevel < LogLevel(level.Load()) {
 		return
 	}
 
