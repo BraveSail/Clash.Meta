@@ -210,9 +210,9 @@ func TestTailnetPeerUnknownPeerFails(t *testing.T) {
 // destination as it stands would come back through the rule that selected this
 // outbound.
 func TestTailnetPeerDialsLocalServiceForItself(t *testing.T) {
-	previousIPv6 := resolver.DisableIPv6
-	resolver.DisableIPv6 = false
-	t.Cleanup(func() { resolver.DisableIPv6 = previousIPv6 })
+	previousIPv6 := resolver.DisableIPv6()
+	resolver.SetDisableIPv6(false)
+	t.Cleanup(func() { resolver.SetDisableIPv6(previousIPv6) })
 
 	listener, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {

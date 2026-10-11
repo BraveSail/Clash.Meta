@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/common/utils"
@@ -27,9 +28,15 @@ var (
 	// SystemResolver always using system dns, and was init in dns module
 	SystemResolver Resolver
 
-	// DisableIPv6 means don't resolve ipv6 host
+	// disableIPv6 means don't resolve ipv6 host
 	// default value is true
-	DisableIPv6 = true
+	//
+	// It is written by every configuration apply and read by every lookup,
+	// on different goroutines - a hub channel resolving a name while the
+	// configuration is reloaded interleaves the two. It is atomic for the
+	// same reason log.level is: a bare bool read and written concurrently is
+	// a data race.
+	disableIPv6 atomic.Bool
 
 	// DefaultHosts aim to resolve hosts
 	DefaultHosts = NewHosts(trie.New[HostValue]())
@@ -37,6 +44,20 @@ var (
 	// DefaultDNSTimeout defined the default dns request timeout
 	DefaultDNSTimeout = time.Second * 5
 )
+
+// DisableIPv6 reports whether ipv6 names are left unresolved.
+func DisableIPv6() bool {
+	return disableIPv6.Load()
+}
+
+// SetDisableIPv6 is the write side of DisableIPv6.
+func SetDisableIPv6(disable bool) {
+	disableIPv6.Store(disable)
+}
+
+func init() {
+	disableIPv6.Store(true)
+}
 
 var (
 	ErrIPNotFound   = errors.New("couldn't find ip")
@@ -104,7 +125,7 @@ func ResolveIPv4(ctx context.Context, host string) (netip.Addr, error) {
 
 // LookupIPv6WithResolver same as LookupIPv6, but with a resolver
 func LookupIPv6WithResolver(ctx context.Context, host string, r Resolver) ([]netip.Addr, error) {
-	if DisableIPv6 {
+	if DisableIPv6() {
 		return nil, ErrIPv6Disabled
 	}
 
@@ -158,11 +179,11 @@ func LookupIPWithResolver(ctx context.Context, host string, r Resolver) ([]netip
 	}
 
 	if r != nil && r.Invalid() {
-		if DisableIPv6 {
+		if DisableIPv6() {
 			return r.LookupIPv4(ctx, host)
 		}
 		return r.LookupIP(ctx, host)
-	} else if DisableIPv6 {
+	} else if DisableIPv6() {
 		return LookupIPv4WithResolver(ctx, host, r)
 	}
 
