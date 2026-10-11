@@ -348,9 +348,24 @@ func (c *Client) watch(ctx context.Context, attempt way) error {
 	})
 	// The core's own dialer, or the tunnel, so reaching the hub does not
 	// depend on the tunnel the configuration being fetched would build.
-	conn, _, _, err := ws.Dialer{Header: header, NetDial: attempt.dial}.Dial(ctx, target)
+	//
+	// The second return value is a reader holding whatever the hub sent in
+	// the same segment as its 101 - and the hub pushes the first profile
+	// from inside the upgrade handler, so on a low-latency path that frame
+	// arrives with the handshake. Dropping the reader loses those bytes: the
+	// stream is then read from the middle of a frame (a garbled message), or
+	// the push is never seen at all and the device waits out the poll. They
+	// are replayed through a conn wrapper instead, so the handshake costs
+	// nothing when it carries nothing and loses nothing when it does.
+	conn, br, _, err := ws.Dialer{Header: header, NetDial: attempt.dial}.Dial(ctx, target)
 	if err != nil {
 		return fmt.Errorf("profile: watch dial %s over %s: %w", target, attempt.name, err)
+	}
+	if br != nil {
+		if buffered := bufferedBytes(br); len(buffered) > 0 {
+			conn = newPreBufferedConn(conn, buffered)
+		}
+		ws.PutReader(br)
 	}
 	defer func() {
 		_ = conn.Close()

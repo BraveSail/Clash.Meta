@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -141,6 +142,45 @@ func proxyHostname(proxy *url.URL) string {
 // identity matters, and skipping the check would make the scheme decorative.
 func tlsClient(conn net.Conn, hostname string) net.Conn {
 	return tls.Client(conn, &tls.Config{ServerName: hostname})
+}
+
+// bufferedBytes takes the bytes a handshake left in its reader. ws.Dialer.Dial
+// returns a non-nil reader exactly when the peer wrote something after the 101
+// response, and those bytes are already consumed from the connection: whoever
+// reads the conn next would start after them.
+func bufferedBytes(br *bufio.Reader) []byte {
+	buffered := br.Buffered()
+	if buffered <= 0 {
+		return nil
+	}
+	pre := make([]byte, buffered)
+	_, _ = io.ReadFull(br, pre)
+	return pre
+}
+
+// preBufferedConn replays the bytes a handshake buffered before handing reads
+// to the connection itself, so a frame that arrived with the 101 is read as if
+// it had been sent afterwards.
+type preBufferedConn struct {
+	net.Conn
+	buf []byte
+}
+
+func newPreBufferedConn(conn net.Conn, pre []byte) *preBufferedConn {
+	// The reader this came from is returned to its own pool, so the bytes are
+	// copied out rather than referenced.
+	held := make([]byte, len(pre))
+	copy(held, pre)
+	return &preBufferedConn{Conn: conn, buf: held}
+}
+
+func (c *preBufferedConn) Read(p []byte) (int, error) {
+	if len(c.buf) > 0 {
+		n := copy(p, c.buf)
+		c.buf = c.buf[n:]
+		return n, nil
+	}
+	return c.Conn.Read(p)
 }
 
 // timeZero clears a deadline set for an operation that is over.
