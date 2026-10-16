@@ -132,10 +132,23 @@ func physicalAddresses(candidates map[string][]netip.Addr) []netip.Addr {
 // uid-route, main-table, rpdb-main-rule, winipcfg-metric, socket-probe,
 // protected-probe, interface-scan).
 func (d *PeerDirectory) chooseReportAddress(candidates map[string][]netip.Addr) (string, string, string) {
-	if addr, ifcName := d.underlay(); ifcName != "" && dialableReportAddress(addr) {
-		// Android: a protected socket names both the interface and the exact
-		// source address the system would use, which beats an interface lookup.
-		return addr.String(), ifcName, "protected-probe"
+	if addr, ifcName := d.underlay(); ifcName != "" {
+		if dialableReportAddress(addr) {
+			// Android: a protected socket names both the interface and the exact
+			// source address the system would use, which beats an interface lookup.
+			return addr.String(), ifcName, "protected-probe"
+		}
+		// The probe runs two anchors, udp6 first and udp4 second, so an IPv6
+		// outage makes the udp4 one answer and the address that comes back is an
+		// IPv4 one. The interface it names is still the network carrying traffic,
+		// and that is the part worth keeping: publish that interface's IPv6
+		// instead of falling through to a scan that takes whichever interface
+		// sorts first. Dropping it here is what made a phone alternate between
+		// its Wi-Fi and its SIM address - one answer per probe outcome - rather
+		// than following the network it was actually using.
+		if addrs := dialableOn(candidates, ifcName); len(addrs) > 0 {
+			return addrs[0].String(), ifcName, "protected-probe"
+		}
 	}
 	strategies := []struct {
 		how string

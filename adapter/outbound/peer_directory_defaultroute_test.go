@@ -95,6 +95,33 @@ func TestChooseReportAddressFailsOpen(t *testing.T) {
 	}
 }
 
+// The protected probe runs a udp6 anchor and then a udp4 one, so an IPv6 outage
+// makes it answer with an IPv4 address. The interface it names is still the
+// network carrying traffic, and the decision has to keep that: falling through
+// to the scan publishes whichever interface sorts first, which on a phone with a
+// SIM is the cellular one. That is how a phone alternated between its Wi-Fi and
+// its SIM address, one answer per probe outcome.
+func TestChooseReportAddressKeepsTheProbeInterfaceWhenItsAddressIsIPv4(t *testing.T) {
+	stubStrategy(t, "ccmni1", "", "", "")
+	directory := testDirectory(t)
+	// What the udp4 anchor answers on Android: an IPv4 source address.
+	directory.storeUnderlay(netip.MustParseAddr("192.168.1.3"), "wlan0")
+
+	candidates := map[string][]netip.Addr{
+		"ccmni1": {netip.MustParseAddr("240e:57c:d658:2ac2:18df:bbd:55ca:d63c")},
+		"ccmni2": {netip.MustParseAddr("2409:815a:d887:35e1:18dd:484a:d9ea:2a")},
+		"wlan0":  {netip.MustParseAddr("2408:8256:d284:a953:22f9:384:ef85:8cbf")},
+	}
+	addr, ifaceName, how := directory.chooseReportAddress(candidates)
+	if addr != "2408:8256:d284:a953:22f9:384:ef85:8cbf" || ifaceName != "wlan0" {
+		t.Fatalf("chooseReportAddress = %q iface=%q how=%q, want the probe's interface (wlan0), not the first scan hit",
+			addr, ifaceName, how)
+	}
+	if how != "protected-probe" {
+		t.Fatalf("how = %q, want protected-probe since the probe named the interface", how)
+	}
+}
+
 // Every candidate belongs to a tunnel: there is nothing to publish, and saying
 // so is better than publishing the tunnel's address.
 func TestChooseReportAddressWithOnlyVirtualCandidates(t *testing.T) {
