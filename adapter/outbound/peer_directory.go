@@ -40,7 +40,14 @@ const (
 	peerDirectoryDefaultPort    = 23333
 	peerDirectoryDefaultRefresh = 30 * time.Second
 	peerDirectoryDefaultTimeout = 10 * time.Second
-	peerDirectoryLookupTTL      = 2 * time.Second
+	// A directory request is one HTTPS round trip, and on a network whose path
+	// to the directory is slow (a direct connection to a CDN edge that is far
+	// away or deprioritised takes seconds) it costs more than the dial that
+	// asked for it. A dial cannot wait seconds per connection, so the answer is
+	// held long enough that a burst and a stream of new connections share one
+	// lookup; the heartbeat keeps the address itself fresh, so a cached entry
+	// cannot outlive a peer's move by more than this window.
+	peerDirectoryLookupTTL = 60 * time.Second
 	// A directory that shows which nodes are up needs to hear from a node even
 	// when its address did not move, so a report goes out at least this often.
 	peerDirectoryDefaultHeartbeat = 2 * time.Minute
