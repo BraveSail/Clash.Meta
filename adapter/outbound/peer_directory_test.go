@@ -613,6 +613,68 @@ func TestPeerDirectoryRemembersTheRouteThatWorked(t *testing.T) {
 	}
 }
 
+// A fallback must not become the permanent answer. Promoting whichever route
+// last worked turns one failure of the proxy into a silent, permanent
+// degradation - the proxy is never tried again even after it recovers - which is
+// the exact failure the proxy-first order exists to avoid.
+func TestAFallbackDoesNotDisplaceTheConfiguredFirstRouteForGood(t *testing.T) {
+	var proxyHits, directHits atomic.Int32
+	serve := func(counter *atomic.Int32) http.HandlerFunc {
+		return func(writer http.ResponseWriter, request *http.Request) {
+			counter.Add(1)
+			writer.Header().Set("content-type", "application/json")
+			if request.URL.Path == "/lookup" {
+				_, _ = writer.Write([]byte(`{"nodes":{"peer":{"id":"peer","addr":"::1","port":8443}}}`))
+				return
+			}
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}
+	hub := httptest.NewServer(serve(&directHits))
+	defer hub.Close()
+	proxy := httptest.NewServer(serve(&proxyHits))
+	defer proxy.Close()
+
+	node, err := NewPeerDirectory(PeerDirectoryOption{
+		Name: "fallback directory", URL: hub.URL, Token: "secret",
+		ID: "this-device", Port: 8443, ViaProxy: proxy.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = node.Close() }()
+
+	// The proxy answered, so it holds the lead outright: no fallback is in
+	// force and the walk starts where the configuration says it should.
+	if _, _, _, err := node.lookup(context.Background(), "peer"); err != nil {
+		t.Fatalf("lookup through the proxy failed: %v", err)
+	}
+	if got := node.orderedWays()[0].name; got != "proxy" {
+		t.Errorf("the walk starts on %q after the proxy answered, want proxy", got)
+	}
+
+	// A fallback answered. It may lead for now, but only for a bounded time -
+	// an expiry in the past is what the next call must observe, and the way to
+	// observe it without sleeping is to ask the ordering after the grace.
+	node.mu.Lock()
+	node.rememberWay("direct")
+	grace := node.fallbackUntil
+	node.mu.Unlock()
+	if grace.IsZero() {
+		t.Fatal("a fallback success left no expiry, so it leads forever")
+	}
+	if got := node.orderedWays()[0].name; got != "direct" {
+		t.Errorf("the walk starts on %q right after the fallback answered, want direct", got)
+	}
+
+	node.mu.Lock()
+	node.fallbackUntil = time.Now().Add(-time.Second)
+	node.mu.Unlock()
+	if got := node.orderedWays()[0].name; got != "proxy" {
+		t.Errorf("the walk still starts on %q after the grace expired, want proxy back in front", got)
+	}
+}
+
 // The status surface is what an operator reads when a session drops, so the
 // directory has to feed it: a route that answered and a route that failed are
 // different answers, and the surface exists to tell them apart. A directory with

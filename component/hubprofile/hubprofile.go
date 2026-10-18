@@ -189,8 +189,12 @@ type Client struct {
 	etag    string
 	lastErr error
 	// wayIndex is the route the last success came over, so the walk starts
-	// where the hub was last reachable.
+	// where the hub was last reachable. It only outranks the configured order
+	// while a fallback is in force (see wayFallbackGrace).
 	wayIndex int
+	// fallbackUntil is when the configured first route is worth trying again
+	// after a fallback answered. Zero means the first route is preferred now.
+	fallbackUntil time.Time
 }
 
 // New builds a client. apply is called for every YAML that differs from the
@@ -540,16 +544,35 @@ type wayAnswered struct{ err error }
 func (w wayAnswered) Error() string { return w.err.Error() }
 func (w wayAnswered) Unwrap() error { return w.err }
 
-// preferredWay is the route the last success came over.
+// wayFallbackGrace is how long a fallback route keeps the lead before the
+// configured first route is tried again.
+//
+// Without it the walk degrades silently and permanently: one success on the
+// direct route promotes it above the proxy, and every later pull starts there -
+// so a proxy that came back is never used again, which is the exact failure this
+// design exists to avoid. With it, the proxy is retried on this interval and
+// takes the lead back as soon as it answers.
+const wayFallbackGrace = 5 * time.Minute
+
+// preferredWay is the route the last success came over, or the configured first
+// route when no fallback is in force.
 func (c *Client) preferredWay() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.fallbackUntil.IsZero() || time.Now().After(c.fallbackUntil) {
+		return 0
+	}
 	return c.wayIndex
 }
 
 func (c *Client) rememberWay(index int) {
 	c.mu.Lock()
 	c.wayIndex = index
+	if index == 0 {
+		c.fallbackUntil = time.Time{}
+	} else {
+		c.fallbackUntil = time.Now().Add(wayFallbackGrace)
+	}
 	c.lastErr = nil
 	c.mu.Unlock()
 }

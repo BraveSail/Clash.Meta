@@ -133,8 +133,12 @@ type PeerDirectory struct {
 	// node whose proxy is down still reports straight out.
 	ways []directoryWay
 	// wayIndex is the route the last success came over, so the walk starts
-	// where the directory was last reachable.
+	// where the directory was last reachable. It only outranks the configured
+	// order while a fallback is in force (see wayFallbackGrace).
 	wayIndex int
+	// fallbackUntil is when the configured first route is worth trying again
+	// after a fallback answered. Zero means the first route is preferred now.
+	fallbackUntil time.Time
 	// registry is this node's mesh status surface, if one is running. It is
 	// optional: a PeerDirectory can be built by a caller that has no mesh (a
 	// test, or a bare lookup client), and the status surface must not be a
@@ -369,14 +373,31 @@ func (d *PeerDirectory) noteReport(addr string) {
 	d.registry.NoteReport(addr)
 }
 
-// orderedWays is the routes in the order to try them: the one the last success
-// came over first, then the rest in their configured order.
+// wayFallbackGrace is how long a fallback route keeps its place at the front of
+// the walk before the configured first route is tried again.
+//
+// Without it the walk degrades silently and permanently: one success on the
+// direct route promotes it above the proxy, and every later request starts
+// there - so a proxy that came back is never used again, which is the exact
+// failure this design was meant to avoid. With it, the proxy is retried on this
+// interval and takes the lead back as soon as it answers.
+const wayFallbackGrace = 5 * time.Minute
+
+// orderedWays is the routes in the order to try them: the configured order,
+// except that a fallback that answered recently is tried first so a request
+// does not pay a failing attempt every time.
+//
+// The promoted route is index 0 unless a fallback is in force, so a healthy
+// proxy keeps its configured place at the front.
 func (d *PeerDirectory) orderedWays() []directoryWay {
 	d.mu.Lock()
 	ways := d.ways
 	preferred := d.wayIndex
+	fallbackUntil := d.fallbackUntil
 	d.mu.Unlock()
-	if len(ways) < 2 || preferred <= 0 || preferred >= len(ways) {
+	// The configured order is the answer whenever the first route is the one
+	// that worked, or when the fallback's grace has run out.
+	if len(ways) < 2 || preferred <= 0 || preferred >= len(ways) || time.Now().After(fallbackUntil) {
 		return ways
 	}
 	ordered := make([]directoryWay, 0, len(ways))
@@ -386,16 +407,25 @@ func (d *PeerDirectory) orderedWays() []directoryWay {
 	return ordered
 }
 
-// rememberWay records the route that answered, so the next request starts
-// there rather than paying a failed attempt on every call.
+// rememberWay records the route that answered.
+//
+// A fallback (anything but the configured first route) is only promoted for
+// wayFallbackGrace; the first route keeps its place outright, so a proxy that
+// recovers is used again on the next request rather than on some later one.
 func (d *PeerDirectory) rememberWay(name string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for i, way := range d.ways {
-		if way.name == name {
-			d.wayIndex = i
+		if way.name != name {
+			continue
+		}
+		d.wayIndex = i
+		if i == 0 {
+			d.fallbackUntil = time.Time{}
 			return
 		}
+		d.fallbackUntil = time.Now().Add(wayFallbackGrace)
+		return
 	}
 }
 
