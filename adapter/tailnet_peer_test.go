@@ -132,9 +132,10 @@ func TestTailnetPeerResolvesThroughTheDirectory(t *testing.T) {
 	}
 
 	stub.movePeer("2409:895a::9")
-	// Both the outbound and the directory client cache for a moment, so the
-	// next connection after that window dials the new address.
-	time.Sleep(2300 * time.Millisecond)
+	// A failed dial is the signal that an address moved: the outbound forgets
+	// its answer, and the directory's answer for the same record is dropped
+	// with it, so the next resolve asks instead of repeating the address that
+	// just failed.
 	peer.invalidate()
 	host, _, err = peer.resolveForEcho(context.Background(), nil)
 	if err != nil || host != "2409:895a::9" {

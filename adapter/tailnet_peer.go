@@ -362,10 +362,23 @@ func (t *TailnetPeer) storeResolved(key, host string, port int, self bool) {
 
 // invalidate forgets every resolved record, so the next dial asks the
 // directory again: a failed connection is the signal that an address moved.
+// The directory's own answer for those records is dropped with it - otherwise
+// the next dial would be handed the same address that just failed and wait for
+// a background refresh to correct it.
 func (t *TailnetPeer) invalidate() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	keys := make([]string, 0, len(t.cachedPeers))
+	for key := range t.cachedPeers {
+		keys = append(keys, key)
+	}
 	t.cachedPeers = nil
+	directory := t.directory
+	t.mu.Unlock()
+	if directory != nil {
+		for _, key := range keys {
+			directory.ForgetPeer(key)
+		}
+	}
 }
 
 func (t *TailnetPeer) innerProxy() C.Proxy {

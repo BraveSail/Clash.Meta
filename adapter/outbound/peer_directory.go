@@ -47,7 +47,14 @@ const (
 	// held long enough that a burst and a stream of new connections share one
 	// lookup; the heartbeat keeps the address itself fresh, so a cached entry
 	// cannot outlive a peer's move by more than this window.
+	//
+	// The window no longer gates a dial: an answer past it is still handed to
+	// the caller and refreshed in the background, so a directory that is slow
+	// or down costs a connection nothing.
 	peerDirectoryLookupTTL = 60 * time.Second
+	// A background refresh is allowed more time than a dial would be: nothing
+	// waits on it, and a directory that is merely slow should still answer.
+	peerDirectoryRefreshTimeout = 20 * time.Second
 	// A directory that shows which nodes are up needs to hear from a node even
 	// when its address did not move, so a report goes out at least this often.
 	peerDirectoryDefaultHeartbeat = 2 * time.Minute
@@ -137,6 +144,14 @@ type PeerDirectory struct {
 	heartbeat         time.Duration
 	peers             map[string]cachedPeer
 	warnedOnce        bool
+	// refreshMu guards refreshing, the set of ids a background refresh is
+	// already in flight for: a burst of connections that all find the same
+	// stale answer still costs one lookup.
+	refreshMu  sync.Mutex
+	refreshing map[string]bool
+	// lastSeen remembers the address last handed out per id, so a move is worth
+	// one log line rather than one per connection.
+	lastSeen map[string]string
 }
 
 type cachedPeer struct {
@@ -213,6 +228,10 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 	}
 	peerdirectory.Register(option.Name, directory)
 	log.Debugln("[PeerDirectory](%s) reporting as %s every %s when nothing changes", option.Name, option.ID, heartbeat)
+	// Addresses learned before a restart are read back first: a dial that
+	// arrives before the first lookup completes then answers from disk instead
+	// of waiting on the directory.
+	directory.loadPersistedPeers()
 	go directory.startUnderlayWatch()
 	go directory.run()
 	return directory, nil
@@ -270,6 +289,12 @@ func (d *PeerDirectory) MarshalJSON() ([]byte, error) {
 // record carrying this node's own id has answered with this node - that is how
 // a profile addresses a device by the alias the dashboard gave it and is still
 // handed back to itself.
+//
+// A dial must never wait on the directory. An answer inside peerDirectoryLookupTTL
+// is returned as it stands; an answer that has aged out is returned as it stands
+// too, and the refresh runs in the background, so a slow or unreachable directory
+// costs a dial nothing. Only a peer never seen before - no memory, no persisted
+// entry - waits for a lookup, and that wait is bounded by the client's timeout.
 func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int, bool, error) {
 	if id == d.option.ID {
 		return "", d.option.Port, true, nil
@@ -277,30 +302,123 @@ func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int
 	d.mu.Lock()
 	cached, ok := d.peers[id]
 	d.mu.Unlock()
-	if ok && time.Since(cached.at) < peerDirectoryLookupTTL {
-		return cached.addr, cached.port, cached.self, nil
+	// Only an answer that names another device can be handed out without
+	// asking: "this name is me" is a judgement about the directory's current
+	// data (an alias added or removed changes it) and a stale one would hand
+	// this node its own address, which a dial must never do. A cached self is
+	// therefore re-confirmed rather than reused.
+	if ok && cached.addr != "" && !cached.self {
+		// An answer in hand is returned now; a stale one is refreshed behind
+		// the dial rather than in front of it.
+		if time.Since(cached.at) >= peerDirectoryLookupTTL {
+			d.refreshPeerAsync(id)
+		}
+		return cached.addr, cached.port, false, nil
 	}
 	addr, port, nodeID, err := d.lookup(ctx, id)
 	if err != nil {
-		if ok {
+		if ok && !cached.self {
 			// The directory is unreachable or the record expired: an address we
 			// saw a moment ago is still the best guess, and the caller's dial
-			// either works or fails into its own retry.
+			// either works or fails into its own retry. A cached "this is me"
+			// is not a guess worth making: answering it would point this node
+			// at itself.
 			log.Debugln("[PeerDirectory](%s) lookup %s failed (%v); keeping %s from %s ago", d.Name(), id, err, cached.addr, time.Since(cached.at).Round(time.Second))
-			return cached.addr, cached.port, cached.self, nil
+			return cached.addr, cached.port, false, nil
 		}
 		return "", 0, false, err
 	}
 	self := nodeID != "" && nodeID == d.option.ID
-	d.mu.Lock()
-	d.peers[id] = cachedPeer{addr: addr, port: port, self: self, at: time.Now()}
-	d.mu.Unlock()
-	if self {
+	d.storePeer(id, cachedPeer{addr: addr, port: port, self: self, at: time.Now()})
+	if !self {
+		// A peer whose address is known survives a restart: the next dial after
+		// one does not have to reach the directory first.
+		d.storePersistedPeer(id, addr, port)
+	} else {
 		// The directory resolved this name to this node: the service the name
-		// reaches is the one this node serves.
+		// reaches is the one this node serves. Nothing to persist for a peer
+		// that is this node.
+		d.forgetPersistedPeer(id)
 		return "", d.option.Port, true, nil
 	}
 	return addr, port, false, nil
+}
+
+// storePeer records one answer in memory under the lock the rest of the type
+// uses, so a reader never sees a half-written entry.
+func (d *PeerDirectory) storePeer(id string, entry cachedPeer) {
+	d.mu.Lock()
+	if d.peers == nil {
+		d.peers = map[string]cachedPeer{}
+	}
+	d.peers[id] = entry
+	d.mu.Unlock()
+}
+
+// ForgetPeer drops what this directory holds for [id], so the next question is
+// answered by the directory rather than by the answer just proven wrong. A dial
+// that failed is the signal: it calls this through the outbound that owns the
+// record, and the next dial then asks instead of repeating the failure.
+func (d *PeerDirectory) ForgetPeer(id string) {
+	d.mu.Lock()
+	delete(d.peers, id)
+	d.mu.Unlock()
+	d.forgetPersistedPeer(id)
+}
+
+// refreshPeerAsync asks the directory again for [id] without making a dial wait
+// for it. The refresh is skipped when one is already in flight for that id, so a
+// burst of connections that all find the same stale answer still costs one
+// lookup.
+func (d *PeerDirectory) refreshPeerAsync(id string) {
+	d.refreshMu.Lock()
+	if d.refreshing == nil {
+		d.refreshing = map[string]bool{}
+	}
+	if d.refreshing[id] {
+		d.refreshMu.Unlock()
+		return
+	}
+	d.refreshing[id] = true
+	d.refreshMu.Unlock()
+
+	go func() {
+		defer func() {
+			d.refreshMu.Lock()
+			delete(d.refreshing, id)
+			d.refreshMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(d.ctx, peerDirectoryRefreshTimeout)
+		defer cancel()
+		addr, port, nodeID, err := d.lookup(ctx, id)
+		if err != nil {
+			log.Debugln("[PeerDirectory](%s) background refresh of %s failed (%v); keeping the answer in hand", d.Name(), id, err)
+			return
+		}
+		self := nodeID != "" && nodeID == d.option.ID
+		if self {
+			d.forgetPersistedPeer(id)
+			return
+		}
+		d.storePeer(id, cachedPeer{addr: addr, port: port, self: false, at: time.Now()})
+		d.storePersistedPeer(id, addr, port)
+		if d.moved(id, addr) {
+			log.Infoln("[PeerDirectory](%s) %s moved to %s:%d", d.Name(), id, addr, port)
+		}
+	}()
+}
+
+// moved reports whether [id]'s address differs from the one last published to
+// this node's own dialers, so a move is worth one log line.
+func (d *PeerDirectory) moved(id, addr string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lastSeen == nil {
+		d.lastSeen = map[string]string{}
+	}
+	previous, ok := d.lastSeen[id]
+	d.lastSeen[id] = addr
+	return ok && previous != addr
 }
 
 func (d *PeerDirectory) lookup(ctx context.Context, id string) (string, int, string, error) {
