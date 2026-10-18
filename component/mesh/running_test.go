@@ -24,6 +24,36 @@ func TestPublishIsWhatRunningAnswers(t *testing.T) {
 	}
 }
 
+// A mesh block expands into one outbound per device and they share one
+// registry, so the registry has as many holders as there are entries. Closing
+// one of them must not take the surface away from its siblings: that would make
+// a node with a running mesh answer "no mesh".
+func TestClosingOneEntryKeepsTheSurfaceForItsSiblings(t *testing.T) {
+	Withdraw(Running()) // start from a clean slot
+
+	first := PublishIfAbsent("self-id", 23333, "https://hub.example")
+	second := PublishIfAbsent("self-id", 23333, "https://hub.example")
+	third := PublishIfAbsent("self-id", 23333, "https://hub.example")
+	t.Cleanup(func() { Withdraw(Running()) })
+
+	if first != second || second != third {
+		t.Fatal("the entries of one mesh block did not share a registry")
+	}
+
+	Withdraw(third)
+	if Running() != first {
+		t.Error("closing one entry took the surface away from its siblings")
+	}
+	Withdraw(second)
+	if Running() != first {
+		t.Error("closing the second entry took the surface away while one still ran")
+	}
+	Withdraw(first)
+	if running := Running(); running != nil {
+		t.Error("the surface survived after every entry was closed")
+	}
+}
+
 // A reload installs the replacement before the previous outbound stops, so the
 // outgoing mesh must not be able to withdraw the incoming one's registry: that
 // would leave the control API answering "no mesh" while a mesh is running, which
