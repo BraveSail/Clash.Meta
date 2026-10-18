@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
+	"github.com/metacubex/mihomo/component/mesh"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 )
@@ -91,6 +92,9 @@ type TailnetPeer struct {
 	// directory is this outbound's handle on the shared directory client, if one
 	// was configured inline.
 	directory *outbound.PeerDirectory
+	// registry is this node's mesh status registry, shared by every entry the
+	// block expanded into (see PublishIfAbsent).
+	registry *mesh.StatusRegistry
 
 	mu        sync.Mutex
 	inner     C.Proxy
@@ -160,6 +164,12 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 		}
 		peer.directory = directory
 	}
+	// The mesh publishes one status registry for the whole node, not one per
+	// outbound: a `mesh:` block expands into several entries that all describe
+	// the same node, and "how many connections does this node carry" is a
+	// question about the node. The first entry to be built installs it; the
+	// rest find it already running.
+	peer.registry = mesh.PublishIfAbsent(option.directoryID(), option.Port, option.DirectoryURL)
 	inner, err := peer.buildInner("", 0)
 	if err != nil {
 		return nil, err
@@ -193,6 +203,7 @@ func (t *TailnetPeer) buildInner(host string, port int) (C.Proxy, error) {
 }
 
 func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	key := t.recordKey(requestedHost(metadata))
 	if _, _, self, err := t.resolveFor(ctx, requestedHost(metadata)); err != nil {
 		return nil, err
 	} else if self {
@@ -209,8 +220,49 @@ func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.
 	conn, err := proxy.DialContext(ctx, metadata)
 	if err != nil {
 		t.invalidate()
+		t.noteDialFailure(key, err)
+		return nil, err
 	}
-	return conn, err
+	// The connection is counted while it is open, and the count is what makes
+	// "how many streams does this peer carry" a fact rather than a guess. The
+	// release is wrapped so the count follows the connection's own lifetime,
+	// not the caller's bookkeeping.
+	return t.countConnection(key, conn), nil
+}
+
+// countConnection wraps [conn] so the node's registry sees the connection while
+// it is open. The wrapper is what a reader counts; nothing here closes anything,
+// because a connection's lifetime belongs to whoever opened it.
+func (t *TailnetPeer) countConnection(key string, conn C.Conn) C.Conn {
+	if t.registry == nil {
+		return conn
+	}
+	release := t.registry.NoteDial(key)
+	return &countedConn{Conn: conn, release: release}
+}
+
+func (t *TailnetPeer) noteDialFailure(key string, err error) {
+	if t.registry != nil {
+		t.registry.NoteDialFailure(key)
+	}
+	if err != nil {
+		log.Debugln("[Mesh] %s could not be reached: %v", key, err)
+	}
+}
+
+// countedConn releases the registry's connection count when the connection
+// closes. Close is the only place a connection ends, and a double Close must not
+// report two connections ending: the registry's release is idempotent, so this
+// stays a plain delegation.
+type countedConn struct {
+	C.Conn
+	release func()
+}
+
+func (c *countedConn) Close() error {
+	err := c.Conn.Close()
+	c.release()
+	return err
 }
 
 // requestedHost is the name a connection asked for, lower case, or empty when
@@ -360,13 +412,16 @@ func (t *TailnetPeer) resolveFor(ctx context.Context, host string) (resolved str
 	if t.directory != nil {
 		addr, addrPort, isSelf, err := t.directory.PeerAddress(ctx, key)
 		if err != nil {
+			t.noteResolveError(key, err)
 			return "", 0, false, fmt.Errorf("tailnet-peer: %w", err)
 		}
 		if isSelf {
 			t.storeResolved(key, "", 0, true)
+			t.noteResolved(key, "", 0, true)
 			return "", 0, true, nil
 		}
 		t.storeResolved(key, addr, addrPort, false)
+		t.noteResolved(key, addr, addrPort, false)
 		return addr, addrPort, false, nil
 	}
 
@@ -387,6 +442,27 @@ func (t *TailnetPeer) storeResolved(key, host string, port int, self bool) {
 		t.cachedPeers = make(map[string]resolvedPeer)
 	}
 	t.cachedPeers[key] = resolvedPeer{host: host, port: port, self: self, at: time.Now()}
+}
+
+// noteResolved and noteResolveError report one resolution to the node's
+// registry. They are separate from storeResolved because the cache and the
+// status surface answer different questions: the cache is what a dial reads, the
+// status is what an operator reads, and a resolution the cache drops (a failed
+// one) is still worth showing.
+func (t *TailnetPeer) noteResolved(key, addr string, port int, self bool) {
+	if t.registry == nil {
+		return
+	}
+	t.registry.NotePeerAnswer(key, mesh.PeerAnswer{
+		Addr: addr, Port: port, Self: self, Source: "directory", At: time.Now(),
+	})
+}
+
+func (t *TailnetPeer) noteResolveError(key string, err error) {
+	if t.registry == nil {
+		return
+	}
+	t.registry.NotePeerError(key, err)
 }
 
 // invalidate forgets every resolved record, so the next dial asks the
@@ -445,6 +521,12 @@ func (t *TailnetPeer) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 }
 
 func (t *TailnetPeer) Close() error {
+	if t.registry != nil {
+		// Only the registry still published is withdrawn, so a reload that has
+		// already installed the replacement does not lose it (see Withdraw).
+		mesh.Withdraw(t.registry)
+		t.registry = nil
+	}
 	if t.directory != nil {
 		releaseDirectoryClient(t.directory)
 		t.directory = nil

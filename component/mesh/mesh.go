@@ -80,7 +80,7 @@ type PeerStatus struct {
 
 // DirectoryStatus is the discovery half.
 type DirectoryStatus struct {
-	URL  string
+	URL string
 	// Route is the route that last answered, by name.
 	Route  string
 	Routes []RouteStatus
