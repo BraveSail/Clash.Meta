@@ -226,17 +226,17 @@ func New(config Config, apply ApplyFunc) (*Client, error) {
 
 // ways lists the routes to the hub in the order they are tried.
 //
-// Direct first, deliberately. A device pulls its configuration to find out what
-// it should run - including the proxy that configuration may install - so the
-// first attempt must not depend on that proxy: a device whose only route out is
-// the proxy it has not yet been told about would otherwise never be told. The
-// direct attempt costs one connection when it works, and when the network
-// resets it the proxy attempt follows.
+// Proxy first, deliberately. A hub that answers only through a proxy the
+// device already has is reached on the first attempt instead of paying a
+// failed direct connection every time, and the direct route stays behind it so
+// a device whose proxy is down still gets its configuration. The remembered
+// route wins over this order once one has worked (see preferredWay).
 func (c *Client) ways() []way {
-	ways := []way{{name: "direct", client: c.direct, dial: c.dialDirect}}
+	ways := make([]way, 0, 2)
 	if c.through != nil {
 		ways = append(ways, way{name: "proxy", client: c.through, dial: c.dialThrough})
 	}
+	ways = append(ways, way{name: "direct", client: c.direct, dial: c.dialDirect})
 	return ways
 }
 

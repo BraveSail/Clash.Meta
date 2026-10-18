@@ -183,20 +183,20 @@ func TestADeadDirectRouteFallsBackToTheProxy(t *testing.T) {
 	}
 }
 
-// A working direct route is used, and the proxy is not touched: the fallback
-// costs nothing while the preferred way works.
-func TestAWorkingDirectRouteIsPreferred(t *testing.T) {
+// A working proxy route is used, and the direct route is not touched: the
+// fallback costs nothing while the preferred way works.
+func TestAWorkingProxyRouteIsPreferred(t *testing.T) {
 	fixture := newProxyTestHub(t, "mode: rule\n", `"v1"`)
 
 	client := fixture.clientFor(t, func([]byte) error { return nil })
 	if err := client.Pull(context.Background()); err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
-	if fixture.proxyHits.Load() != 0 {
-		t.Errorf("the proxy was used %d times while direct worked", fixture.proxyHits.Load())
+	if fixture.proxyHits.Load() == 0 {
+		t.Error("the proxy route was not used at all")
 	}
-	if fixture.directHits.Load() == 0 {
-		t.Error("the direct route was not used at all")
+	if fixture.directHits.Load() != 0 {
+		t.Errorf("the direct route was used %d times while the proxy worked", fixture.directHits.Load())
 	}
 }
 
@@ -210,7 +210,9 @@ func TestTheRouteThatWorkedIsRemembered(t *testing.T) {
 	if err := client.Pull(context.Background()); err != nil {
 		t.Fatalf("first Pull: %v", err)
 	}
-	if client.preferredWay() != 1 {
+	// The proxy is the first route, so a pull that had to fall back to it is
+	// remembered as index 0.
+	if client.preferredWay() != 0 {
 		t.Fatalf("the working route was not remembered: preferredWay = %d", client.preferredWay())
 	}
 
@@ -261,13 +263,14 @@ func TestAnAnswerFromTheHubStopsTheWalk(t *testing.T) {
 	if !strings.Contains(err.Error(), "401") {
 		t.Errorf("the error does not carry the hub's answer: %v", err)
 	}
-	// The hub answered, so the route works and the other one would only repeat
-	// the same refusal.
-	if proxyRequests.Load() != 0 {
-		t.Errorf("the proxy was tried %d times after the hub answered", proxyRequests.Load())
-	}
+	// The hub answered over the first route (the proxy), so the walk stopped:
+	// the hub was asked once and nothing else was tried. The proxy answered 502
+	// to the CONNECT, which is the hub's own refusal and not a route failure.
 	if hubHits.Load() != 1 {
 		t.Errorf("the hub was asked %d times, want 1", hubHits.Load())
+	}
+	if proxyRequests.Load() != 1 {
+		t.Errorf("the proxy was tried %d times, want 1", proxyRequests.Load())
 	}
 }
 
@@ -292,7 +295,7 @@ func TestBothRoutesDownIsReported(t *testing.T) {
 // device with a typo in its configuration should hear about it while starting.
 func TestABadProxyURLIsRefusedAtConstruction(t *testing.T) {
 	base := Config{
-		URL:  "https://hub.example",
+		URL:   "https://hub.example",
 		Token: "t",
 		ID:    "ont",
 	}

@@ -126,9 +126,16 @@ type PeerDirectory struct {
 	*Base
 
 	option PeerDirectoryOption
-	client *http.Client
-	ctx    context.Context
-	cancel context.CancelFunc
+	// ways are the routes a request to the directory may take, in the order
+	// they are tried: the proxy first when one is configured, the direct route
+	// last. A node that can only reach the directory one way stays in it, and a
+	// node whose proxy is down still reports straight out.
+	ways []directoryWay
+	// wayIndex is the route the last success came over, so the walk starts
+	// where the directory was last reachable.
+	wayIndex int
+	ctx      context.Context
+	cancel   context.CancelFunc
 
 	mu         sync.Mutex
 	etag       string
@@ -191,14 +198,26 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 	if option.Timeout > 0 {
 		timeout = time.Duration(option.Timeout) * time.Second
 	}
-	transport := directoryTransport()
+	// Every request to the directory walks these routes in order: the proxy
+	// first when the profile names one, then the direct route. Both stay in the
+	// list, so a proxy that is down does not take the directory away and a
+	// direct path the network resets does not either - the one that works is
+	// remembered and tried first next time.
+	ways := make([]directoryWay, 0, 2)
 	if strings.TrimSpace(option.ViaProxy) != "" {
 		proxyTransport, err := directoryProxyTransport(option.ViaProxy)
 		if err != nil {
 			return nil, err
 		}
-		transport = proxyTransport
+		ways = append(ways, directoryWay{
+			name:   "proxy",
+			client: &http.Client{Timeout: timeout, Transport: proxyTransport},
+		})
 	}
+	ways = append(ways, directoryWay{
+		name:   "direct",
+		client: &http.Client{Timeout: timeout, Transport: directoryTransport()},
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	heartbeat := peerDirectoryDefaultHeartbeat
 	if option.Heartbeat > 0 {
@@ -220,7 +239,7 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 			ProviderName: option.ProviderName,
 		}),
 		option:    option,
-		client:    &http.Client{Timeout: timeout, Transport: transport},
+		ways:      ways,
 		ctx:       ctx,
 		cancel:    cancel,
 		heartbeat: heartbeat,
@@ -273,6 +292,73 @@ func directoryProxyTransport(rawProxyURL string) (*http.Transport, error) {
 	transport := directoryTransport()
 	transport.Proxy = http.ProxyURL(proxyURL)
 	return transport, nil
+}
+
+// directoryWay is one route a request to the directory may take: the client it
+// goes through and the name a log line can call it.
+type directoryWay struct {
+	name   string
+	client *http.Client
+}
+
+// do sends [request] over the routes in order, starting with the one the last
+// success came over. A route that answers - including an error status, which is
+// the directory speaking and not the route failing - ends the walk; only an
+// unreachable route moves on to the next. A request body has to be re-readable
+// for the second attempt, which is why the caller passes a builder rather than
+// a request.
+func (d *PeerDirectory) do(ctx context.Context, build func() (*http.Request, error)) (*http.Response, error) {
+	ways := d.orderedWays()
+	var lastErr error
+	for i, way := range ways {
+		request, err := build()
+		if err != nil {
+			return nil, err
+		}
+		response, err := way.client.Do(request)
+		if err == nil {
+			if i != 0 {
+				d.rememberWay(way.name)
+				log.Debugln("[PeerDirectory](%s) reached the directory over %s", d.Name(), way.name)
+			}
+			return response, nil
+		}
+		lastErr = err
+		if len(ways) > 1 {
+			log.Debugln("[PeerDirectory](%s) %s route to the directory failed: %v", d.Name(), way.name, err)
+		}
+	}
+	return nil, lastErr
+}
+
+// orderedWays is the routes in the order to try them: the one the last success
+// came over first, then the rest in their configured order.
+func (d *PeerDirectory) orderedWays() []directoryWay {
+	d.mu.Lock()
+	ways := d.ways
+	preferred := d.wayIndex
+	d.mu.Unlock()
+	if len(ways) < 2 || preferred <= 0 || preferred >= len(ways) {
+		return ways
+	}
+	ordered := make([]directoryWay, 0, len(ways))
+	ordered = append(ordered, ways[preferred])
+	ordered = append(ordered, ways[:preferred]...)
+	ordered = append(ordered, ways[preferred+1:]...)
+	return ordered
+}
+
+// rememberWay records the route that answered, so the next request starts
+// there rather than paying a failed attempt on every call.
+func (d *PeerDirectory) rememberWay(name string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i, way := range d.ways {
+		if way.name == name {
+			d.wayIndex = i
+			return
+		}
+	}
 }
 
 func (d *PeerDirectory) MarshalJSON() ([]byte, error) {
@@ -436,7 +522,10 @@ func (d *PeerDirectory) lookup(ctx context.Context, id string) (string, int, str
 		return "", 0, "", err
 	}
 	d.authorize(request)
-	response, err := d.client.Do(request)
+	response, err := d.do(ctx, func() (*http.Request, error) {
+		attempt := request.Clone(ctx)
+		return attempt, nil
+	})
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -614,19 +703,21 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 	if err != nil {
 		return
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(d.option.URL, "/")+"/report", bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	request.Header.Set("content-type", "application/json")
-	d.authorize(request)
 	d.mu.Lock()
 	etag := d.etag
 	d.mu.Unlock()
-	if etag != "" {
-		request.Header.Set("if-none-match", etag)
-	}
-	response, err := d.client.Do(request)
+	response, err := d.do(ctx, func() (*http.Request, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(d.option.URL, "/")+"/report", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("content-type", "application/json")
+		d.authorize(request)
+		if etag != "" {
+			request.Header.Set("if-none-match", etag)
+		}
+		return request, nil
+	})
 	if err != nil {
 		d.logFailure("report failed: %v", err)
 		return

@@ -16,8 +16,18 @@ import (
 )
 
 // tailnetPeerResolveTTL keeps a burst of connections from re-asking the
-// directory while still following a peer that changes networks.
-const tailnetPeerResolveTTL = 2 * time.Second
+// directory while still following a peer that changes networks. It is long
+// enough that a steady peer is not re-resolved between the connections of one
+// session, and short enough that a move is followed within a few seconds; the
+// resolve is also what carries a failed dial's invalidation, so it does not
+// have to be tiny for correctness.
+const tailnetPeerResolveTTL = 30 * time.Second
+
+// tailnetPeerRetiredLimit bounds how many superseded inner proxies are kept
+// alive for the streams still running through them. Each one is a protocol
+// client with its own connection pool, so the set is small on purpose: the
+// limit only has to outlast the connections a peer's move interrupted.
+const tailnetPeerRetiredLimit = 4
 
 // TailnetPeerOption dials a peer whose underlay address changes. The inner
 // `proxy` configuration supplies the protocol; its `server` and `port` are
@@ -85,6 +95,9 @@ type TailnetPeer struct {
 	mu        sync.Mutex
 	inner     C.Proxy
 	innerHost string
+	// retired holds inner proxies this outbound has replaced, kept alive until
+	// the streams still running through them finish (see proxyForDial).
+	retired []C.Proxy
 	// cachedPeers is one answer per directory record, not one per outbound: a
 	// mesh entry serves every device, so a single slot would answer every
 	// connection with whichever device it looked up first.
@@ -268,6 +281,13 @@ func (t *TailnetPeer) ListenPacketContext(ctx context.Context, metadata *C.Metad
 // proxyForDial returns the proxy to use for one connection: DIRECT when the
 // resolved device is this node, otherwise the inner proxy bound to that
 // device's current address, dialled at the port its own record carries.
+//
+// A peer that moves gets a new inner proxy, and the one it replaced is NOT
+// closed: an inner proxy holds the pooled connections of every stream already
+// running through it, so closing it on an address change would cut a live
+// session (a remote-desktop stream is the case that made this visible). The
+// superseded proxy is kept in a small set and released once nothing is using
+// it, which is what makes an address change cost the new connections only.
 func (t *TailnetPeer) proxyForDial(ctx context.Context, host string) (C.Proxy, error) {
 	resolved, port, self, err := t.resolveFor(ctx, host)
 	if err != nil {
@@ -286,10 +306,19 @@ func (t *TailnetPeer) proxyForDial(ctx context.Context, host string) (C.Proxy, e
 		return nil, err
 	}
 	previous := t.inner
+	previousHost := t.innerHost
 	t.inner = inner
 	t.innerHost = resolved
-	if previous != nil {
-		_ = previous.Close()
+	if previous != nil && previousHost != "" {
+		// Kept, not closed: a stream that is already running through the old
+		// proxy has to finish. The next connection builds a new proxy, so the
+		// old one is reachable only by connections it already carries.
+		t.retired = append(t.retired, previous)
+		if len(t.retired) > tailnetPeerRetiredLimit {
+			oldest := t.retired[0]
+			t.retired = t.retired[1:]
+			go func() { _ = oldest.Close() }()
+		}
 	}
 	return inner, nil
 }
@@ -426,6 +455,10 @@ func (t *TailnetPeer) Close() error {
 		_ = t.inner.Close()
 		t.inner = nil
 	}
+	for _, proxy := range t.retired {
+		_ = proxy.Close()
+	}
+	t.retired = nil
 	if t.direct != nil {
 		_ = t.direct.Close()
 	}

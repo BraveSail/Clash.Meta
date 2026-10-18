@@ -504,6 +504,104 @@ func TestPeerDirectoryReachesTheDirectoryThroughItsProxy(t *testing.T) {
 	}
 }
 
+// A proxy that is configured but down must not take the directory away: the
+// direct route is tried next, and a node whose proxy died still reports. This
+// is the fallback half of "proxy first, direct behind it" - without it a device
+// pointed at a dead proxy is offline while the directory is reachable.
+func TestPeerDirectoryFallsBackToDirectWhenTheProxyIsDown(t *testing.T) {
+	var sawReport atomic.Bool
+	hub := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("content-type", "application/json")
+		switch request.URL.Path {
+		case "/report":
+			sawReport.Store(true)
+			writer.Header().Set("etag", `"2409:8a55::1:8443"`)
+			_, _ = writer.Write([]byte(`{"addr":"2409:8a55::1","port":8443}`))
+		case "/lookup":
+			_, _ = writer.Write([]byte(`{"nodes":{"peer":{"id":"peer","addr":"::1","port":8443}}}`))
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer hub.Close()
+
+	node, err := NewPeerDirectory(PeerDirectoryOption{
+		Name:     "fallback directory",
+		URL:      hub.URL,
+		Token:    "secret",
+		ID:       "this-device",
+		Port:     8443,
+		ViaProxy: "http://127.0.0.1:1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = node.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+		t.Fatalf("the direct route was not tried after the proxy failed: %v", err)
+	}
+	node.report(ctx, "2409:8a55::1")
+	if !sawReport.Load() {
+		t.Fatal("the report never reached the directory over the direct route")
+	}
+}
+
+// The route that worked is the one tried first next time, so a device on a
+// network that only reaches the directory one way does not pay a failed attempt
+// on every request. Both routes are live here, so the assertion is about which
+// one carried the second request.
+func TestPeerDirectoryRemembersTheRouteThatWorked(t *testing.T) {
+	var proxyHits, directHits atomic.Int32
+	serve := func(counter *atomic.Int32) http.HandlerFunc {
+		return func(writer http.ResponseWriter, request *http.Request) {
+			counter.Add(1)
+			writer.Header().Set("content-type", "application/json")
+			if request.URL.Path == "/lookup" {
+				_, _ = writer.Write([]byte(`{"nodes":{"peer":{"id":"peer","addr":"::1","port":8443}}}`))
+				return
+			}
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}
+	hub := httptest.NewServer(serve(&directHits))
+	defer hub.Close()
+	proxy := httptest.NewServer(serve(&proxyHits))
+	defer proxy.Close()
+
+	node, err := NewPeerDirectory(PeerDirectoryOption{
+		Name:     "remembering directory",
+		URL:      hub.URL,
+		Token:    "secret",
+		ID:       "this-device",
+		Port:     8443,
+		ViaProxy: proxy.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = node.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The proxy is tried first, so it is the route remembered.
+	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+		t.Fatalf("first lookup failed: %v", err)
+	}
+	if proxyHits.Load() == 0 {
+		t.Fatal("the first lookup did not take the proxy, which is the configured first route")
+	}
+	before := proxyHits.Load()
+	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+		t.Fatalf("second lookup failed: %v", err)
+	}
+	if proxyHits.Load() == before {
+		t.Error("the second lookup did not take the remembered route")
+	}
+}
+
 // A directory that names no port reports the default, and that default has to
 // be the port the mesh listens on: a report of any other value points every
 // peer at a port nothing binds, and the failure shows up on the peer while
