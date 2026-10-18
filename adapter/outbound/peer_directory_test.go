@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/component/mesh"
 	"github.com/metacubex/mihomo/component/peerdirectory"
 )
 
@@ -609,6 +610,84 @@ func TestPeerDirectoryRemembersTheRouteThatWorked(t *testing.T) {
 	}
 	if proxyHits.Load() == before {
 		t.Error("the second lookup did not take the remembered route")
+	}
+}
+
+// The status surface is what an operator reads when a session drops, so the
+// directory has to feed it: a route that answered and a route that failed are
+// different answers, and the surface exists to tell them apart. A directory with
+// no surface attached must keep working - that is a normal configuration, not an
+// error.
+func TestPeerDirectoryReportsItsRoutesToTheStatusSurface(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(`{"nodes":{"peer":{"id":"peer","addr":"::1","port":8443}}}`))
+	}))
+	defer hub.Close()
+
+	node, err := NewPeerDirectory(PeerDirectoryOption{
+		Name:  "reporting directory",
+		URL:   hub.URL,
+		Token: "secret",
+		ID:    "this-device",
+		Port:  8443,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = node.Close() }()
+
+	registry := mesh.NewStatusRegistry(nil, hub.URL)
+	node.SetRegistry(registry)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+		t.Fatalf("lookup failed: %v", err)
+	}
+
+	status := registry.Status()
+	var found bool
+	for _, route := range status.Directory.Routes {
+		if route.Name == "direct" {
+			found = true
+			if route.Attempts == 0 {
+				t.Error("the direct route answered but the surface records no attempt")
+			}
+			if route.LastError != "" {
+				t.Errorf("the direct route answered but the surface records %q", route.LastError)
+			}
+			if route.LastOK.IsZero() {
+				t.Error("the direct route answered but the surface records no success time")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the surface has no record of the direct route: %+v", status.Directory.Routes)
+	}
+}
+
+// A directory built by a caller that has no mesh must not require a status
+// surface to work: attaching one is optional.
+func TestPeerDirectoryWorksWithoutAStatusSurface(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(`{"nodes":{"peer":{"id":"peer","addr":"::1","port":8443}}}`))
+	}))
+	defer hub.Close()
+
+	node, err := NewPeerDirectory(PeerDirectoryOption{
+		Name: "bare directory", URL: hub.URL, Token: "secret", ID: "this-device", Port: 8443,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = node.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+		t.Fatalf("a directory with no status surface failed to look up: %v", err)
 	}
 }
 

@@ -170,6 +170,12 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 	// question about the node. The first entry to be built installs it; the
 	// rest find it already running.
 	peer.registry = mesh.PublishIfAbsent(option.directoryID(), option.Port, option.DirectoryURL)
+	// The directory reports its routes and its accepted address to the same
+	// surface, so "which way did the hub answer" and "where does the hub think
+	// this node is" are readable beside the mesh's own state.
+	if peer.directory != nil {
+		peer.directory.SetRegistry(peer.registry)
+	}
 	inner, err := peer.buildInner("", 0)
 	if err != nil {
 		return nil, err

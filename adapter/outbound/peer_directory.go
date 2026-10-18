@@ -23,6 +23,7 @@ import (
 
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface"
+	"github.com/metacubex/mihomo/component/mesh"
 	"github.com/metacubex/mihomo/component/peerdirectory"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -134,6 +135,11 @@ type PeerDirectory struct {
 	// wayIndex is the route the last success came over, so the walk starts
 	// where the directory was last reachable.
 	wayIndex int
+	// registry is this node's mesh status surface, if one is running. It is
+	// optional: a PeerDirectory can be built by a caller that has no mesh (a
+	// test, or a bare lookup client), and the status surface must not be a
+	// requirement for the directory to work.
+	registry *mesh.StatusRegistry
 	ctx      context.Context
 	cancel   context.CancelFunc
 
@@ -317,18 +323,50 @@ func (d *PeerDirectory) do(ctx context.Context, build func() (*http.Request, err
 		}
 		response, err := way.client.Do(request)
 		if err == nil {
+			// The route answered. A response with an error status is still the
+			// route working: the directory replied, and asking the other way
+			// would get the same reply. That is why only a transport failure
+			// moves the walk on.
+			d.noteRoute(way.name, nil)
 			if i != 0 {
 				d.rememberWay(way.name)
 				log.Debugln("[PeerDirectory](%s) reached the directory over %s", d.Name(), way.name)
 			}
 			return response, nil
 		}
+		d.noteRoute(way.name, err)
 		lastErr = err
 		if len(ways) > 1 {
 			log.Debugln("[PeerDirectory](%s) %s route to the directory failed: %v", d.Name(), way.name, err)
 		}
 	}
 	return nil, lastErr
+}
+
+// SetRegistry gives the directory a status surface to report its routes to. It
+// is a setter rather than a constructor argument because the registry is built
+// by the mesh, and the directory can be shared with a caller that has no mesh.
+func (d *PeerDirectory) SetRegistry(registry *mesh.StatusRegistry) {
+	d.registry = registry
+}
+
+// noteRoute reports one route's outcome, and does nothing when no status surface
+// is attached: a directory without a mesh is a normal configuration.
+func (d *PeerDirectory) noteRoute(route string, err error) {
+	if d.registry == nil {
+		return
+	}
+	d.registry.NoteRoute(route, err)
+}
+
+// noteReport reports that the directory accepted this node's address. A node
+// whose address the hub has never acknowledged is a node nobody can reach, so
+// this is worth surfacing separately from the route that carried it.
+func (d *PeerDirectory) noteReport(addr string) {
+	if d.registry == nil {
+		return
+	}
+	d.registry.NoteReport(addr)
 }
 
 // orderedWays is the routes in the order to try them: the one the last success
@@ -735,6 +773,7 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 		elapsed := d.markSent(addr)
 		d.resetWarning()
 		d.logHeartbeat(elapsed)
+		d.noteReport(addr)
 	case http.StatusOK:
 		var payload struct {
 			Addr string `json:"addr"`
@@ -756,6 +795,7 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 			d.logHeartbeat(elapsed)
 		}
 		d.resetWarning()
+		d.noteReport(payload.Addr)
 	default:
 		d.logFailure("report rejected with %d", response.StatusCode)
 	}
