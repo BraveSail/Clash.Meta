@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/metacubex/mihomo/component/profile/cachefile"
 )
 
 // A dial must not wait on the directory. These tests pin the three behaviours
@@ -197,6 +199,140 @@ func TestUsableStalePeerBoundsHowOldAnAnswerMayBe(t *testing.T) {
 	}
 	if usableStalePeer(time.Time{}) {
 		t.Fatal("an entry with no timestamp must not be used")
+	}
+	// The window has to outlast the in-memory TTL, or "aged out but still
+	// worth keeping" would be an empty range and the boundary would be a
+	// no-op however it is written.
+	if stalePeerTTL <= peerDirectoryLookupTTL {
+		t.Fatalf("stalePeerTTL = %s, want it longer than the lookup TTL %s", stalePeerTTL, peerDirectoryLookupTTL)
+	}
+}
+
+// TestPeerAddressAsksAgainWhenThePersistedAnswerIsTooOld pins the boundary on
+// the path that actually reaches it: only a persisted entry can be a day old,
+// because a running process refreshes behind every dial past
+// peerDirectoryLookupTTL. An entry past stalePeerTTL is not handed out - the
+// directory is asked instead - so a device that has been off the network for a
+// day is not dialled where it used to be.
+func TestPeerAddressAsksAgainWhenThePersistedAnswerIsTooOld(t *testing.T) {
+	var calls atomic.Int64
+	server := lookupStub(t, "2408::7", &calls, nil)
+	url := server.URL
+
+	// An answer this node learned, aged past the window the way a machine left
+	// off the network for a day would find it.
+	persistWithAge(t, url, "peer-d", "2408::6", 23333, stalePeerTTL+time.Hour)
+
+	// The process reads it back on startup, but must not dial it: the
+	// directory is asked instead.
+	directory, err := NewPeerDirectory(PeerDirectoryOption{
+		Name: "aging directory", URL: url, ID: "self", Port: 23333,
+	})
+	if err != nil {
+		t.Fatalf("NewPeerDirectory (restart): %v", err)
+	}
+	t.Cleanup(func() { _ = directory.Close() })
+
+	addr, _, _, err := directory.PeerAddress(context.Background(), "peer-d")
+	if err != nil {
+		t.Fatalf("PeerAddress: %v", err)
+	}
+	if addr != "2408::7" {
+		t.Fatalf("PeerAddress = %q, want the fresh answer 2408::7 rather than the aged 2408::6", addr)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("an answer past stalePeerTTL was handed out without asking the directory")
+	}
+}
+
+// TestPeerAddressRefusesAnAnswerTooOldToBeWorthKeeping is the other half of the
+// same boundary: when the directory cannot be reached either, an answer past
+// stalePeerTTL is not handed out as a last resort. Reporting the failure is the
+// truth - the caller's own retry follows - while dialling a day-old address
+// costs a failed connection first.
+func TestPeerAddressRefusesAnAnswerTooOldToBeWorthKeeping(t *testing.T) {
+	var calls atomic.Int64
+	var failing atomic.Bool
+	server := lookupStub(t, "2408::8", &calls, &failing)
+	directory, err := NewPeerDirectory(PeerDirectoryOption{
+		Name: "aging fallback directory", URL: server.URL, ID: "self", Port: 23333,
+	})
+	if err != nil {
+		t.Fatalf("NewPeerDirectory: %v", err)
+	}
+	t.Cleanup(func() { _ = directory.Close() })
+
+	// An answer the directory gave a moment ago is still the best guess when
+	// the directory goes down.
+	directory.storePeer("peer-e", cachedPeer{
+		addr: "2408::9", port: 23333, at: time.Now().Add(-2 * peerDirectoryLookupTTL),
+	})
+	failing.Store(true)
+	kept, _, _, err := directory.PeerAddress(context.Background(), "peer-e")
+	if err != nil || kept != "2408::9" {
+		t.Fatalf("a fresh-enough answer was not kept: %q err=%v", kept, err)
+	}
+
+	// One past the window is not: the failure is reported instead.
+	directory.storePeer("peer-e", cachedPeer{
+		addr: "2408::9", port: 23333, at: time.Now().Add(-stalePeerTTL - time.Hour),
+	})
+	if addr, _, _, err := directory.PeerAddress(context.Background(), "peer-e"); err == nil {
+		t.Fatalf("an answer past stalePeerTTL was handed out as %q while the directory was down", addr)
+	}
+}
+
+// persistWithAge writes the persisted entry for [id] with a timestamp [age] in
+// the past, so a test can describe a machine that has been off the network for
+// that long without waiting for it.
+func persistWithAge(t *testing.T, url, id, addr string, port int, age time.Duration) {
+	t.Helper()
+	probe, err := NewPeerDirectory(PeerDirectoryOption{
+		Name: "aging probe", URL: url, ID: "self", Port: 23333,
+	})
+	if err != nil {
+		t.Fatalf("NewPeerDirectory (probe): %v", err)
+	}
+	prefix := probe.peerCacheStoragePrefix()
+	_ = probe.Close()
+
+	cache := cachefile.Cache()
+	if cache == nil {
+		t.Skip("no cache file on this machine to age an entry in")
+	}
+	raw, err := json.Marshal(persistedPeer{Addr: addr, Port: port, At: time.Now().Add(-age).Unix()})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	cache.SetStorage(prefix+id, raw)
+	t.Cleanup(func() { cache.DeleteStorage(prefix + id) })
+}
+
+// TestPeerCacheStoragePrefixNamespacesByDirectory pins the key every persisted
+// answer is written under: one cache file is shared by every profile on the
+// machine, so two directories must not read each other's answers.
+func TestPeerCacheStoragePrefixNamespacesByDirectory(t *testing.T) {
+	first, err := NewPeerDirectory(PeerDirectoryOption{
+		Name: "first", URL: "https://hub.example", ID: "pc", Port: 23333,
+	})
+	if err != nil {
+		t.Fatalf("NewPeerDirectory: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	second, err := NewPeerDirectory(PeerDirectoryOption{
+		Name: "second", URL: "https://other.example", ID: "pc", Port: 23333,
+	})
+	if err != nil {
+		t.Fatalf("NewPeerDirectory: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	prefix := first.peerCacheStoragePrefix()
+	if prefix != "peer-directory/"+cacheKeyDigest("https://hub.example")+"/" {
+		t.Fatalf("prefix = %q, want it built from the directory digest", prefix)
+	}
+	if prefix == second.peerCacheStoragePrefix() {
+		t.Fatal("two directories share one storage prefix")
 	}
 }
 

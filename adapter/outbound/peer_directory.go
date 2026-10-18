@@ -393,7 +393,14 @@ func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int
 	// data (an alias added or removed changes it) and a stale one would hand
 	// this node its own address, which a dial must never do. A cached self is
 	// therefore re-confirmed rather than reused.
-	if ok && cached.addr != "" && !cached.self {
+	//
+	// An answer past stalePeerTTL is not handed out either: only a persisted
+	// entry can reach that age (a running process refreshes behind every dial
+	// past peerDirectoryLookupTTL, and a report keeps the directory's own copy
+	// fresh), and a device that has been off the network for a day has had time
+	// to move. Asking in front of the dial costs a wait; dialling where the
+	// peer used to be costs a failed dial plus the retry that follows.
+	if ok && cached.addr != "" && !cached.self && usableStalePeer(cached.at) {
 		// An answer in hand is returned now; a stale one is refreshed behind
 		// the dial rather than in front of it.
 		if time.Since(cached.at) >= peerDirectoryLookupTTL {
@@ -403,7 +410,7 @@ func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int
 	}
 	addr, port, nodeID, err := d.lookup(ctx, id)
 	if err != nil {
-		if ok && !cached.self {
+		if ok && !cached.self && usableStalePeer(cached.at) {
 			// The directory is unreachable or the record expired: an address we
 			// saw a moment ago is still the best guess, and the caller's dial
 			// either works or fails into its own retry. A cached "this is me"

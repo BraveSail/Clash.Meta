@@ -5,18 +5,11 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
-	"time"
 
 	"github.com/metacubex/mihomo/component/icmptunnel"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 )
-
-var ipv4Loopback = netip.MustParseAddr("127.0.0.1")
-
-// tailnetEchoTimeout bounds one echo this node makes for a ping that is aimed
-// at the peer.
-const tailnetEchoTimeout = 3 * time.Second
 
 // ICMPDestination answers with the address an echo aimed at this outbound has to
 // travel to: the address the directory publishes for the peer. The tunnel side

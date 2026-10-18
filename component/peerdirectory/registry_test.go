@@ -20,21 +20,6 @@ func (s *stubDirectory) InjectNetworkChange() {
 	s.injected++
 }
 
-func TestLookupUsesTheRegisteredDirectory(t *testing.T) {
-	directory := &stubDirectory{addr: "2409:8a55::1"}
-	Register("pc-directory", directory)
-	t.Cleanup(func() { Unregister("pc-directory", directory) })
-
-	addr, port, self, err := Lookup(context.Background(), "pc-directory", "gt7")
-	if err != nil || addr != "2409:8a55::1" || port != 8443 || self {
-		t.Fatalf("Lookup = %q %d self=%v err=%v", addr, port, self, err)
-	}
-
-	if _, _, _, err := Lookup(context.Background(), "missing", "gt7"); err == nil {
-		t.Fatal("Lookup of an unregistered directory reported success")
-	}
-}
-
 func TestUnregisterKeepsTheReplacement(t *testing.T) {
 	previous := &stubDirectory{addr: "old"}
 	replacement := &stubDirectory{addr: "new"}
@@ -44,11 +29,17 @@ func TestUnregisterKeepsTheReplacement(t *testing.T) {
 
 	Unregister("directory", previous)
 
-	if count := registeredCount(); count != 1 {
-		t.Fatalf("directories after the old outbound stopped = %d, want the replacement", count)
+	// The replacement has to survive: a config reload builds it before the
+	// previous outbound stops, so removing by name alone would drop the new one.
+	// It is observed through InjectNetworkChange, which reaches every
+	// registered directory - the registry has no reader of its own left.
+	replacement.injected, previous.injected = 0, 0
+	InjectNetworkChange()
+	if replacement.injected != 1 {
+		t.Fatalf("injections on the replacement = %d, want the replacement kept", replacement.injected)
 	}
-	if addr, _, _, _ := Lookup(context.Background(), "directory", "peer"); addr != "new" {
-		t.Fatalf("Lookup = %q, want the replacement", addr)
+	if previous.injected != 0 {
+		t.Fatalf("injections on the removed directory = %d, want it gone", previous.injected)
 	}
 }
 

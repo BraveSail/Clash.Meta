@@ -327,18 +327,28 @@ func TestPeerDirectoryRegistersItselfForPeersOutbounds(t *testing.T) {
 	_, server := newDirectoryStub(t, "2409:8a55::1")
 	directory := newTestDirectory(t, server.URL)
 
-	_, _, self, err := peerdirectory.Lookup(context.Background(), "dir", "pc")
-	if err != nil {
-		t.Fatalf("registered directory is not reachable: %v", err)
-	}
-	if !self {
-		t.Fatal("the directory did not report this node as itself")
+	// Registration is observed through the injection every registered
+	// directory receives: the directory stamps the moment it was told, so a
+	// stamp after the call means it was reachable through the registry.
+	peerdirectory.InjectNetworkChange()
+	if directory.lastInject.IsZero() {
+		t.Fatal("a constructed directory is not reachable through the registry")
 	}
 
 	if err := directory.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := peerdirectory.Lookup(context.Background(), "dir", "pc"); err == nil {
+	// A closed directory has to leave the registry: the injection coalesces
+	// inside a few seconds, so the stamp is cleared and the directory is asked
+	// again through a fresh one to tell "not reached" from "not asked".
+	directory.mu.Lock()
+	directory.lastInject = time.Time{}
+	directory.mu.Unlock()
+	peerdirectory.InjectNetworkChange()
+	directory.mu.Lock()
+	stillStamped := !directory.lastInject.IsZero()
+	directory.mu.Unlock()
+	if stillStamped {
 		t.Fatal("a closed directory is still registered")
 	}
 }

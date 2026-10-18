@@ -25,12 +25,13 @@ import (
 // the directory is unreachable keeps its old address for this window, which is
 // the same trade the in-memory cache already makes.
 
-// peerCacheStorageKey namespaces this peer's persisted answers inside the
-// cache file. The directory URL and the node id are both part of it: one node
-// may talk to two directories, and two nodes share one cache file on a machine
-// that runs more than one profile.
-func (d *PeerDirectory) peerCacheStorageKey(id string) string {
-	return "peer-directory/" + cacheKeyDigest(d.option.URL) + "/" + id
+// peerCacheStoragePrefix namespaces this directory's persisted answers inside
+// the cache file, and every key it writes is built from it. The directory
+// address is part of it because one node may talk to two directories and two
+// profiles share one cache file on a machine; the peer id is appended to it, so
+// the answers of another directory cannot be read as this one's.
+func (d *PeerDirectory) peerCacheStoragePrefix() string {
+	return "peer-directory/" + cacheKeyDigest(d.option.URL) + "/"
 }
 
 // cacheKeyDigest shortens an arbitrary URL into something a bucket key can
@@ -70,7 +71,7 @@ func (d *PeerDirectory) loadPersistedPeers() {
 	if cache == nil {
 		return
 	}
-	prefix := "peer-directory/" + cacheKeyDigest(d.option.URL) + "/"
+	prefix := d.peerCacheStoragePrefix()
 	loaded := 0
 	for _, id := range d.persistedPeerIDs(cache, prefix) {
 		raw := cache.GetStorage(prefix + id)
@@ -124,7 +125,7 @@ func (d *PeerDirectory) storePersistedPeer(id, addr string, port int) {
 	if cache == nil || addr == "" {
 		return
 	}
-	prefix := "peer-directory/" + cacheKeyDigest(d.option.URL) + "/"
+	prefix := d.peerCacheStoragePrefix()
 	entry, err := json.Marshal(persistedPeer{Addr: addr, Port: port, At: time.Now().Unix()})
 	if err != nil {
 		return
@@ -154,7 +155,7 @@ func (d *PeerDirectory) forgetPersistedPeer(id string) {
 	if cache == nil {
 		return
 	}
-	prefix := "peer-directory/" + cacheKeyDigest(d.option.URL) + "/"
+	prefix := d.peerCacheStoragePrefix()
 	cache.DeleteStorage(prefix + id)
 }
 

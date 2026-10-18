@@ -279,10 +279,15 @@ func startHubProfile() func() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	client, err := hubprofile.New(*block, func(pulled []byte) error {
-		// ParseWithBytes, not hub.Parse: the pulled YAML is a whole
+		// ParseWithMeshDiscovery, not hub.Parse: the pulled YAML is a whole
 		// configuration, and hub.Parse would read it from the file this one is
-		// being written beside.
-		parsed, err := executor.ParseWithBytes(pulled)
+		// being written beside. It reads the peer directory first, before the
+		// parse: the parse runs on the apply path, and a request made there
+		// holds the switch to the new configuration up - and every connection
+		// the old one held with it - for as long as the directory takes to
+		// answer. A profile the hub stores carries no resolved device list, so
+		// this is the only place that request can be made from.
+		parsed, err := config.ParseWithMeshDiscovery(ctx, pulled)
 		if err != nil {
 			return err
 		}

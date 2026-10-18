@@ -6,7 +6,6 @@ package peerdirectory
 
 import (
 	"context"
-	"fmt"
 	"reflect"
 	"sync"
 )
@@ -49,19 +48,6 @@ func Unregister(name string, provider DirectoryProvider) {
 	}
 }
 
-// Lookup asks [directory] where the peer [id] is. The port the directory
-// reports is informational: the profile keeps owning the port it dials, which
-// is what the peer's listener is configured with.
-func Lookup(ctx context.Context, directory, id string) (addr string, port int, self bool, err error) {
-	registryMu.Lock()
-	provider, ok := directories[directory]
-	registryMu.Unlock()
-	if !ok {
-		return "", 0, false, fmt.Errorf("peer directory %q is not configured", directory)
-	}
-	return provider.PeerAddress(ctx, id)
-}
-
 // InjectNetworkChange tells every registered directory that the host saw the
 // network change - an interface switch, a reconnected VPN, a connectivity
 // callback - so it republishes the address it has now rather than on its next
@@ -78,12 +64,6 @@ func InjectNetworkChange() {
 			injector.InjectNetworkChange()
 		}
 	}
-}
-
-func registeredCount() int {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	return len(directories)
 }
 
 // sameIdentity compares two interface values without assuming the dynamic type
