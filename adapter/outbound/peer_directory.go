@@ -885,7 +885,85 @@ func pickReportAddress(candidates map[string][]netip.Addr) string {
 
 func dialableReportAddress(addr netip.Addr) bool {
 	addr = addr.Unmap()
-	return addr.Is6() && addr.IsGlobalUnicast() && !addr.IsPrivate() && !addr.IsLoopback()
+	if !addr.IsGlobalUnicast() || addr.IsLoopback() {
+		return false
+	}
+	if addr.Is4() {
+		return dialableReportIPv4(addr)
+	}
+	return !addr.IsPrivate() && !isReservedIPv6(addr)
+}
+
+// dialableReportIPv4 reports whether an IPv4 address is one a peer could dial.
+//
+// netip's IsPrivate only covers RFC 1918, so the other blocks that are not
+// routable on the public internet are listed here: a peer handed one of these
+// would report an address nothing outside its own network can reach.
+func dialableReportIPv4(addr netip.Addr) bool {
+	raw := addr.As4()
+	// The reserved blocks, as (first, last) pairs in address order.
+	for _, block := range reservedIPv4Blocks {
+		if block.contains(raw) {
+			return false
+		}
+	}
+	return true
+}
+
+type ipv4Block struct {
+	first [4]byte
+	last  [4]byte
+}
+
+func (b ipv4Block) contains(raw [4]byte) bool {
+	for i := 0; i < 4; i++ {
+		if raw[i] < b.first[i] {
+			return false
+		}
+		if raw[i] > b.last[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// The blocks that are not reachable from the public internet, plus the
+// benchmarking range and the address space reserved for future use.
+var reservedIPv4Blocks = []ipv4Block{
+	{first: [4]byte{0, 0, 0, 0}, last: [4]byte{0, 255, 255, 255}},       // "this network" (RFC 1122)
+	{first: [4]byte{10, 0, 0, 0}, last: [4]byte{10, 255, 255, 255}},     // private (RFC 1918)
+	{first: [4]byte{100, 64, 0, 0}, last: [4]byte{100, 127, 255, 255}},  // carrier-grade NAT (RFC 6598)
+	{first: [4]byte{127, 0, 0, 0}, last: [4]byte{127, 255, 255, 255}},   // loopback
+	{first: [4]byte{169, 254, 0, 0}, last: [4]byte{169, 254, 255, 255}}, // link local (RFC 3927)
+	{first: [4]byte{172, 16, 0, 0}, last: [4]byte{172, 31, 255, 255}},   // private (RFC 1918)
+	{first: [4]byte{192, 0, 0, 0}, last: [4]byte{192, 0, 0, 255}},       // IETF protocol assignments
+	{first: [4]byte{192, 0, 2, 0}, last: [4]byte{192, 0, 2, 255}},       // documentation (RFC 5737)
+	{first: [4]byte{192, 168, 0, 0}, last: [4]byte{192, 168, 255, 255}}, // private (RFC 1918)
+	{first: [4]byte{198, 18, 0, 0}, last: [4]byte{198, 19, 255, 255}},   // benchmarking (RFC 2544)
+	{first: [4]byte{198, 51, 100, 0}, last: [4]byte{198, 51, 100, 255}}, // documentation (RFC 5737)
+	{first: [4]byte{203, 0, 113, 0}, last: [4]byte{203, 0, 113, 255}},   // documentation (RFC 5737)
+	{first: [4]byte{224, 0, 0, 0}, last: [4]byte{255, 255, 255, 255}},   // multicast and reserved
+}
+
+// isReservedIPv6 covers what IsPrivate misses: the documentation range and the
+// unique-local block, which is routable only inside one site.
+func isReservedIPv6(addr netip.Addr) bool {
+	if addr.Is4In6() {
+		raw := addr.As16()
+		var v4 [4]byte
+		copy(v4[:], raw[12:16])
+		return !dialableReportIPv4(netip.AddrFrom4(v4))
+	}
+	raw := addr.As16()
+	// fc00::/7 — unique local (RFC 4193).
+	if raw[0]&0xfe == 0xfc {
+		return true
+	}
+	// 2001:db8::/32 — documentation (RFC 3849).
+	if raw[0] == 0x20 && raw[1] == 0x01 && raw[2] == 0x0d && raw[3] == 0xb8 {
+		return true
+	}
+	return false
 }
 
 func localAddressesByInterface() map[string][]netip.Addr {
