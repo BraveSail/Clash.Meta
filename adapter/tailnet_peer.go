@@ -209,7 +209,13 @@ func (t *TailnetPeer) buildInner(host string, port int) (C.Proxy, error) {
 }
 
 func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
-	key := t.recordKey(requestedHost(metadata))
+	key, ok := t.recordKey(requestedHost(metadata))
+	if !ok {
+		// Nothing to resolve: no name was asked for and the entry names no peer
+		// of its own. Failing here is what keeps the directory from being asked
+		// with an empty id - a request it refuses, once per dial, forever.
+		return nil, errors.New("tailnet-peer: no record to resolve for this connection")
+	}
 	if _, _, self, err := t.resolveFor(ctx, requestedHost(metadata)); err != nil {
 		return nil, err
 	} else if self {
@@ -287,14 +293,26 @@ func requestedHost(metadata *C.Metadata) string {
 // given a mapping for it, and the configured peer otherwise. A name the map
 // does not know is not an error - a profile may address a device by its own
 // name, and only names someone mapped are guaranteed to be there.
-func (t *TailnetPeer) recordKey(host string) string {
-	if host == "" || len(t.option.Domains) == 0 {
-		return t.directoryNameKey()
+//
+// The second return value says whether there is a record at all. A connection
+// that named nothing still resolves through a peer the entry itself names (the
+// form a profile uses when it addresses one device), so the answer is no only
+// when neither exists - and then it matters: an empty id is a request the
+// directory refuses with 400, which every caller treats as a failure worth
+// retrying. Reporting "no record" is what stops that refusal from becoming a
+// retry loop.
+func (t *TailnetPeer) recordKey(host string) (string, bool) {
+	fallback := t.directoryNameKey()
+	if host == "" {
+		return fallback, fallback != ""
+	}
+	if len(t.option.Domains) == 0 {
+		return fallback, fallback != ""
 	}
 	if id, ok := t.option.Domains[host]; ok && id != "" {
-		return id
+		return id, true
 	}
-	return t.directoryNameKey()
+	return fallback, fallback != ""
 }
 
 // dialLocalService reaches a service that runs on this node. The destination of
@@ -406,7 +424,14 @@ func (t *TailnetPeer) resolveForEcho(ctx context.Context, metadata *C.Metadata) 
 // The port is the device's own: a record carries the port its service listens
 // on, and that is what a name is dialled at.
 func (t *TailnetPeer) resolveFor(ctx context.Context, host string) (resolved string, port int, self bool, err error) {
-	key := t.recordKey(host)
+	key, ok := t.recordKey(host)
+	if !ok {
+		// Nothing was named, so there is nothing to ask the directory about.
+		// Returning an error rather than an empty lookup is what keeps a
+		// connection that named nothing from becoming a request the directory
+		// refuses - once per dial, forever.
+		return "", 0, false, errors.New("tailnet-peer: the connection named no host to resolve")
+	}
 	t.mu.Lock()
 	if cached, ok := t.cachedPeers[key]; ok && time.Since(cached.at) < tailnetPeerResolveTTL {
 		resolved, port, self = cached.host, cached.port, cached.self
