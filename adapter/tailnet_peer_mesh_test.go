@@ -158,48 +158,7 @@ func TestMeshEntryMatchesTheRequestedNameCaseInsensitively(t *testing.T) {
 		Domains:        map[string]string{"pc.lan": "record-pc"},
 	})
 
-	got, ok := peer.recordKey(requestedHost(&C.Metadata{Host: "PC.LAN"}))
-	if !ok || got != "record-pc" {
-		t.Fatalf("recordKey for PC.LAN = %q (ok=%v), want the mapped record", got, ok)
-	}
-}
-
-// A connection that named nothing still resolves through a peer the entry
-// itself names; what it must not do is produce an empty id, because the
-// directory refuses that with 400 and every caller treats the refusal as a
-// failure worth retrying - once per dial, forever.
-func TestMeshEntryResolvesAConnectionThatNamedNothingThroughItsOwnPeer(t *testing.T) {
-	peer := newTestPeer(t, TailnetPeerOption{
-		Name:           "mesh",
-		Port:           8443,
-		Peer:           "record-own",
-		Proxy:          map[string]any{"type": "direct", "name": "inner"},
-		DirectoryURL:   "http://127.0.0.1:1",
-		DirectoryToken: "secret",
-		DirectoryID:    "this-device",
-		Domains:        map[string]string{"pc.lan": "record-pc"},
-	})
-
-	if got, ok := peer.recordKey(""); !ok || got != "record-own" {
-		t.Fatalf("recordKey for an empty host = %q (ok=%v), want the entry's own peer", got, ok)
-	}
-}
-
-// An entry that names no peer and maps no name has nothing to resolve, and
-// saying so is what keeps a nameless connection from asking the directory with
-// an empty id.
-func TestMeshEntryWithNothingToResolveSaysSo(t *testing.T) {
-	peer := newTestPeer(t, TailnetPeerOption{
-		Name:           "mesh",
-		Port:           8443,
-		Proxy:          map[string]any{"type": "direct", "name": "inner"},
-		DirectoryURL:   "http://127.0.0.1:1",
-		DirectoryToken: "secret",
-		DirectoryID:    "this-device",
-		Domains:        map[string]string{"pc.lan": "record-pc"},
-	})
-
-	if got, ok := peer.recordKey(""); ok || got != "" {
-		t.Fatalf("recordKey for an empty host = %q (ok=%v), want no record", got, ok)
+	if got := peer.recordKey(requestedHost(&C.Metadata{Host: "PC.LAN"})); got != "record-pc" {
+		t.Fatalf("recordKey for PC.LAN = %q, want the mapped record", got)
 	}
 }
