@@ -105,6 +105,10 @@ type TailnetPeer struct {
 	mu        sync.Mutex
 	inner     C.Proxy
 	innerHost string
+	// innerIdentity is the peer's VLESS user the current inner proxy was
+	// built with. A peer that reinstalls keeps its address but changes its key,
+	// so an identity change has to rebuild the proxy just like a move does.
+	innerIdentity string
 	// retired holds inner proxies this outbound has replaced, kept alive until
 	// the streams still running through them finish (see proxyForDial).
 	retired []C.Proxy
@@ -184,7 +188,7 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 	if peer.directory != nil {
 		peer.directory.SetRegistry(peer.registry)
 	}
-	inner, err := peer.buildInner("", 0)
+	inner, err := peer.buildInner("", 0, "")
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +201,13 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 // port is the one the device's own record carries: a mesh entry serves devices
 // that listen on whatever port each of them reports, so the entry's own port is
 // not the port to dial.
-func (t *TailnetPeer) buildInner(host string, port int) (C.Proxy, error) {
+func (t *TailnetPeer) buildInner(host string, port int, peerKey string) (C.Proxy, error) {
+	return ParseProxy(t.innerMapping(host, port, peerKey))
+}
+
+// innerMapping is buildInner's configuration without the parse, so the
+// identity a dial carries can be read back in a test.
+func (t *TailnetPeer) innerMapping(host string, port int, peerKey string) map[string]any {
 	mapping := make(map[string]any, len(t.option.Proxy)+4)
 	for key, value := range t.option.Proxy {
 		mapping[key] = value
@@ -210,10 +220,21 @@ func (t *TailnetPeer) buildInner(host string, port int) (C.Proxy, error) {
 	}
 	mapping["server"] = host
 	mapping["port"] = port
+	// The peer's own transport identity, when the directory has told us: a
+	// dial that carried this node's key would be answered by nobody, since in
+	// a mesh with no token every device listens under its own.
+	if t.directory != nil && peerKey != "" {
+		if uuid, encryption, known := t.directory.PeerIdentity(peerKey); known {
+			mapping["uuid"] = uuid
+			if encryption != "" {
+				mapping["encryption"] = encryption
+			}
+		}
+	}
 	if _, ok := mapping["name"]; !ok {
 		mapping["name"] = t.option.Name + " (inner)"
 	}
-	return ParseProxy(mapping)
+	return mapping
 }
 
 func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
@@ -364,10 +385,17 @@ func (t *TailnetPeer) proxyForDial(ctx context.Context, host string) (C.Proxy, e
 	if self {
 		return t.direct, nil
 	}
-	if resolved == t.innerHost && t.inner != nil {
+	key := t.recordKey(host)
+	identity := ""
+	if t.directory != nil {
+		if uuid, _, known := t.directory.PeerIdentity(key); known {
+			identity = uuid
+		}
+	}
+	if resolved == t.innerHost && identity == t.innerIdentity && t.inner != nil {
 		return t.inner, nil
 	}
-	inner, err := t.buildInner(resolved, port)
+	inner, err := t.buildInner(resolved, port, key)
 	if err != nil {
 		return nil, err
 	}
@@ -375,6 +403,7 @@ func (t *TailnetPeer) proxyForDial(ctx context.Context, host string) (C.Proxy, e
 	previousHost := t.innerHost
 	t.inner = inner
 	t.innerHost = resolved
+	t.innerIdentity = identity
 	if previous != nil && previousHost != "" {
 		// Kept, not closed: a stream that is already running through the old
 		// proxy has to finish. The next connection builds a new proxy, so the

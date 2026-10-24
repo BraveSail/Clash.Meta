@@ -183,6 +183,11 @@ type cachedPeer struct {
 	port int
 	self bool
 	at   time.Time
+	// uuid and encryption are what this peer listens as, when the directory
+	// said. They are cached with the address so a dial can use the peer's own
+	// key instead of one the whole mesh shares.
+	uuid       string
+	encryption string
 }
 
 func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
@@ -483,7 +488,8 @@ func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int
 		}
 		return cached.addr, cached.port, false, nil
 	}
-	addr, port, nodeID, err := d.lookup(ctx, id)
+	answer, err := d.lookup(ctx, id)
+	addr, port, nodeID := answer.addr, answer.port, answer.id
 	if err != nil {
 		if ok && !cached.self && usableStalePeer(cached.at) {
 			// The directory is unreachable or the record expired: an address we
@@ -497,7 +503,8 @@ func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int
 		return "", 0, false, err
 	}
 	self := nodeID != "" && nodeID == d.option.ID
-	d.storePeer(id, cachedPeer{addr: addr, port: port, self: self, at: time.Now()})
+	d.storePeer(id, cachedPeer{addr: addr, port: port, self: self, at: time.Now(),
+		uuid: answer.uuid, encryption: answer.encryption})
 	if !self {
 		// A peer whose address is known survives a restart: the next dial after
 		// one does not have to reach the directory first.
@@ -514,6 +521,20 @@ func (d *PeerDirectory) PeerAddress(ctx context.Context, id string) (string, int
 
 // storePeer records one answer in memory under the lock the rest of the type
 // uses, so a reader never sees a half-written entry.
+// PeerIdentity answers what the peer last told the directory it listens as.
+// The third value is false when nothing is known - a peer that has not been
+// resolved yet, or one running an older build that reports no identity - and
+// a caller must then fall back to the key it already has rather than guess.
+func (d *PeerDirectory) PeerIdentity(id string) (uuid, encryption string, known bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	cached, ok := d.peers[id]
+	if !ok || cached.uuid == "" {
+		return "", "", false
+	}
+	return cached.uuid, cached.encryption, true
+}
+
 func (d *PeerDirectory) storePeer(id string, entry cachedPeer) {
 	d.mu.Lock()
 	if d.peers == nil {
@@ -558,7 +579,8 @@ func (d *PeerDirectory) refreshPeerAsync(id string) {
 		}()
 		ctx, cancel := context.WithTimeout(d.ctx, peerDirectoryRefreshTimeout)
 		defer cancel()
-		addr, port, nodeID, err := d.lookup(ctx, id)
+		answer, err := d.lookup(ctx, id)
+		addr, port, nodeID := answer.addr, answer.port, answer.id
 		if err != nil {
 			log.Debugln("[PeerDirectory](%s) background refresh of %s failed (%v); keeping the answer in hand", d.Name(), id, err)
 			return
@@ -568,7 +590,8 @@ func (d *PeerDirectory) refreshPeerAsync(id string) {
 			d.forgetPersistedPeer(id)
 			return
 		}
-		d.storePeer(id, cachedPeer{addr: addr, port: port, self: false, at: time.Now()})
+		d.storePeer(id, cachedPeer{addr: addr, port: port, self: false, at: time.Now(),
+			uuid: answer.uuid, encryption: answer.encryption})
 		d.storePersistedPeer(id, addr, port)
 		if d.moved(id, addr) {
 			log.Infoln("[PeerDirectory](%s) %s moved to %s:%d", d.Name(), id, addr, port)
@@ -589,10 +612,20 @@ func (d *PeerDirectory) moved(id, addr string) bool {
 	return ok && previous != addr
 }
 
-func (d *PeerDirectory) lookup(ctx context.Context, id string) (string, int, string, error) {
+// directoryAnswer is what the directory says about one peer: where it is, and
+// when the peer reported them, the transport identity it listens as.
+type directoryAnswer struct {
+	addr       string
+	port       int
+	id         string
+	uuid       string
+	encryption string
+}
+
+func (d *PeerDirectory) lookup(ctx context.Context, id string) (directoryAnswer, error) {
 	target, err := url.Parse(d.option.URL)
 	if err != nil {
-		return "", 0, "", err
+		return directoryAnswer{}, err
 	}
 	target.Path = strings.TrimSuffix(target.Path, "/") + "/lookup"
 	query := target.Query()
@@ -601,7 +634,7 @@ func (d *PeerDirectory) lookup(ctx context.Context, id string) (string, int, str
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		return "", 0, "", err
+		return directoryAnswer{}, err
 	}
 	d.authorize(request)
 	response, err := d.do(ctx, func() (*http.Request, error) {
@@ -609,34 +642,42 @@ func (d *PeerDirectory) lookup(ctx context.Context, id string) (string, int, str
 		return attempt, nil
 	})
 	if err != nil {
-		return "", 0, "", err
+		return directoryAnswer{}, err
 	}
 	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<16))
 	if err != nil {
-		return "", 0, "", err
+		return directoryAnswer{}, err
 	}
 	if response.StatusCode == http.StatusNotFound {
-		return "", 0, "", fmt.Errorf("peer %q is unknown or expired", id)
+		return directoryAnswer{}, fmt.Errorf("peer %q is unknown or expired", id)
 	}
 	if response.StatusCode != http.StatusOK {
-		return "", 0, "", fmt.Errorf("directory answered %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return directoryAnswer{}, fmt.Errorf("directory answered %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var payload struct {
 		Nodes map[string]struct {
-			ID   string `json:"id"`
-			Addr string `json:"addr"`
-			Port int    `json:"port"`
+			ID         string `json:"id"`
+			Addr       string `json:"addr"`
+			Port       int    `json:"port"`
+			UUID       string `json:"uuid"`
+			Encryption string `json:"encryption"`
 		} `json:"nodes"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", 0, "", err
+		return directoryAnswer{}, err
 	}
 	node, ok := payload.Nodes[id]
 	if !ok || node.Addr == "" {
-		return "", 0, "", fmt.Errorf("peer %q is unknown or expired", id)
+		return directoryAnswer{}, fmt.Errorf("peer %q is unknown or expired", id)
 	}
-	return node.Addr, node.Port, node.ID, nil
+	return directoryAnswer{
+		addr:       node.Addr,
+		port:       node.Port,
+		id:         node.ID,
+		uuid:       node.UUID,
+		encryption: node.Encryption,
+	}, nil
 }
 
 // run reports this node now and then on a jittered cadence: the directory

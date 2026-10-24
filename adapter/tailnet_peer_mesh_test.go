@@ -15,8 +15,9 @@ import (
 // asks: one entry serves every device, so the answer depends on the record the
 // connection's name resolved to.
 type meshDirectory struct {
-	mu    sync.Mutex
-	addrs map[string]string
+	mu         sync.Mutex
+	addrs      map[string]string
+	identities map[string][2]string
 }
 
 func (m *meshDirectory) serve(t *testing.T) *httptest.Server {
@@ -35,10 +36,13 @@ func (m *meshDirectory) serve(t *testing.T) *httptest.Server {
 				writer.WriteHeader(http.StatusNotFound)
 				return
 			}
+			record := map[string]any{"addr": addr, "port": 8443}
+			if identity, ok := m.identities[request.URL.Query().Get("id")]; ok {
+				record["uuid"] = identity[0]
+				record["encryption"] = identity[1]
+			}
 			_ = json.NewEncoder(writer).Encode(map[string]any{
-				"nodes": map[string]any{
-					request.URL.Query().Get("id"): map[string]any{"addr": addr, "port": 8443},
-				},
+				"nodes": map[string]any{request.URL.Query().Get("id"): record},
 			})
 		default:
 			writer.WriteHeader(http.StatusNotFound)
@@ -160,5 +164,71 @@ func TestMeshEntryMatchesTheRequestedNameCaseInsensitively(t *testing.T) {
 
 	if got := peer.recordKey(requestedHost(&C.Metadata{Host: "PC.LAN"})); got != "record-pc" {
 		t.Fatalf("recordKey for PC.LAN = %q, want the mapped record", got)
+	}
+}
+
+// A dial carries the peer's own key, not this node's: in a mesh with no token
+// every device listens under its own identity, so the shared template's key
+// would be answered by nobody.
+func TestADialCarriesThePeersOwnIdentity(t *testing.T) {
+	directory := &meshDirectory{
+		addrs: map[string]string{"record-pc": "2409:895a::aa"},
+		identities: map[string][2]string{
+			"record-pc": {"0fe3320e-8e56-a06b-e7aa-59813fefefee", "mlkem768x25519plus.native.0rtt.PEERKEY"},
+		},
+	}
+	server := directory.serve(t)
+
+	peer := newTestPeer(t, TailnetPeerOption{
+		Name:  "mesh",
+		Port:  8443,
+		Proxy: map[string]any{"type": "direct", "name": "inner"},
+		// This node's own identity: the template a dial must not keep.
+		DirectoryURL:        server.URL,
+		DirectoryToken:      "secret",
+		DirectoryID:         "this-device",
+		DirectoryUUID:       "5790065b-0000-0000-0000-000000000000",
+		DirectoryEncryption: "mlkem768x25519plus.native.0rtt.MYKEY",
+		Domains:             map[string]string{"pc.lan": "record-pc"},
+	})
+
+	host, port, _, err := peer.resolveFor(context.Background(), "pc.lan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping := peer.innerMapping(host, port, "record-pc")
+	if mapping["uuid"] != "0fe3320e-8e56-a06b-e7aa-59813fefefee" {
+		t.Fatalf("uuid = %v, want the peer's", mapping["uuid"])
+	}
+	if mapping["encryption"] != "mlkem768x25519plus.native.0rtt.PEERKEY" {
+		t.Fatalf("encryption = %v, want the peer's", mapping["encryption"])
+	}
+}
+
+// A peer that reports no identity - an older build - leaves the template
+// exactly as it was, so nothing that works today starts failing.
+func TestAPeerWithNoIdentityLeavesTheTemplate(t *testing.T) {
+	directory := &meshDirectory{addrs: map[string]string{"record-pc": "2409:895a::aa"}}
+	server := directory.serve(t)
+
+	peer := newTestPeer(t, TailnetPeerOption{
+		Name:                "mesh",
+		Port:                8443,
+		Proxy:               map[string]any{"type": "direct", "name": "inner"},
+		DirectoryURL:        server.URL,
+		DirectoryToken:      "secret",
+		DirectoryID:         "this-device",
+		DirectoryUUID:       "5790065b-0000-0000-0000-000000000000",
+		DirectoryEncryption: "mlkem768x25519plus.native.0rtt.MYKEY",
+		Domains:             map[string]string{"pc.lan": "record-pc"},
+	})
+
+	host, port, _, err := peer.resolveFor(context.Background(), "pc.lan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping := peer.innerMapping(host, port, "record-pc")
+	if _, ok := mapping["uuid"]; ok {
+		t.Fatalf("uuid = %v, want the template left alone", mapping["uuid"])
 	}
 }

@@ -502,7 +502,7 @@ func TestPeerDirectoryReachesTheDirectoryThroughItsProxy(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+	if _, err := node.lookup(ctx, "peer"); err != nil {
 		t.Fatalf("lookup through the proxy failed: %v", err)
 	}
 	node.report(ctx, "2409:8a55::1")
@@ -551,7 +551,7 @@ func TestPeerDirectoryFallsBackToDirectWhenTheProxyIsDown(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+	if _, err := node.lookup(ctx, "peer"); err != nil {
 		t.Fatalf("the direct route was not tried after the proxy failed: %v", err)
 	}
 	node.report(ctx, "2409:8a55::1")
@@ -598,14 +598,14 @@ func TestPeerDirectoryRemembersTheRouteThatWorked(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// The proxy is tried first, so it is the route remembered.
-	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+	if _, err := node.lookup(ctx, "peer"); err != nil {
 		t.Fatalf("first lookup failed: %v", err)
 	}
 	if proxyHits.Load() == 0 {
 		t.Fatal("the first lookup did not take the proxy, which is the configured first route")
 	}
 	before := proxyHits.Load()
-	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+	if _, err := node.lookup(ctx, "peer"); err != nil {
 		t.Fatalf("second lookup failed: %v", err)
 	}
 	if proxyHits.Load() == before {
@@ -646,7 +646,7 @@ func TestAFallbackDoesNotDisplaceTheConfiguredFirstRouteForGood(t *testing.T) {
 
 	// The proxy answered, so it holds the lead outright: no fallback is in
 	// force and the walk starts where the configuration says it should.
-	if _, _, _, err := node.lookup(context.Background(), "peer"); err != nil {
+	if _, err := node.lookup(context.Background(), "peer"); err != nil {
 		t.Fatalf("lookup through the proxy failed: %v", err)
 	}
 	if got := node.orderedWays()[0].name; got != "proxy" {
@@ -704,7 +704,7 @@ func TestPeerDirectoryReportsItsRoutesToTheStatusSurface(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+	if _, err := node.lookup(ctx, "peer"); err != nil {
 		t.Fatalf("lookup failed: %v", err)
 	}
 
@@ -748,7 +748,7 @@ func TestPeerDirectoryWorksWithoutAStatusSurface(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, _, _, err := node.lookup(ctx, "peer"); err != nil {
+	if _, err := node.lookup(ctx, "peer"); err != nil {
 		t.Fatalf("a directory with no status surface failed to look up: %v", err)
 	}
 }
