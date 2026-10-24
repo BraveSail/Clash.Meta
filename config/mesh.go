@@ -6,14 +6,80 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
+	meshident "github.com/metacubex/mihomo/component/mesh"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/transport/vless/encryption"
 )
+
+// meshDirectoryProxy answers the proxy the directory's own requests go through.
+//
+// An explicit URL wins. Otherwise the block may ask for this node's mixed-port
+// inbound, and the URL is built from the port and credentials the configuration
+// already carries: the app used to construct it and write it into the profile,
+// which meant it had to know how the core addresses its own listener.
+func meshDirectoryProxy(block *RawMesh, rawCfg *RawConfig) string {
+	if block.DirectoryProxy != "" {
+		return block.DirectoryProxy
+	}
+	if !block.DirectoryViaProxy || rawCfg == nil || rawCfg.MixedPort <= 0 {
+		return ""
+	}
+	userinfo := ""
+	if len(rawCfg.Authentication) > 0 {
+		name, secret, hasSecret := strings.Cut(rawCfg.Authentication[0], ":")
+		switch {
+		case hasSecret:
+			userinfo = url.UserPassword(name, secret).String() + "@"
+		case name != "":
+			userinfo = url.User(name).String() + "@"
+		}
+	}
+	return "http://" + userinfo + "127.0.0.1:" + strconv.Itoa(rawCfg.MixedPort)
+}
+
+// meshIdentityFields is what this device reports itself as: the id the
+// directory knows it under, the name it is shown by, and the system it runs.
+//
+// A profile that names them wins - an operator overriding a name from the
+// dashboard is a deliberate act. What is left empty is derived from the machine
+// itself, because one profile runs on every device of the mesh: a value written
+// into the file would be one device's id claimed by all of them, which is why
+// the app used to compute and inject these fields on every start.
+func meshIdentityFields(block *RawMesh) map[string]any {
+	id := strings.TrimSpace(block.DirectoryID)
+	name := strings.TrimSpace(block.DeviceName)
+	osName := strings.TrimSpace(block.DeviceOS)
+	if id == "" || name == "" || osName == "" {
+		derived := meshident.Derive()
+		if id == "" {
+			id = derived.ID
+		}
+		if name == "" {
+			name = derived.Name
+		}
+		if osName == "" {
+			osName = derived.OS
+		}
+	}
+	fields := make(map[string]any, 3)
+	if id != "" {
+		fields["directory-id"] = id
+	}
+	if name != "" {
+		fields["hostname"] = name
+	}
+	if osName != "" {
+		fields["os"] = osName
+	}
+	return fields
+}
 
 // meshDefaultPort is the port a device listens on - and is dialled at - when
 // its entry in the mesh does not name one.
@@ -111,6 +177,12 @@ type RawMesh struct {
 	// stays readable and reportable. Empty keeps them off the tunnel, the way
 	// they have always gone.
 	DirectoryProxy string `yaml:"directory-proxy,omitempty" json:"directory-proxy,omitempty"`
+	// DirectoryViaProxy asks for that proxy to be this node's own mixed-port
+	// inbound, so the core builds the URL from the port and credentials it
+	// already runs with. It exists so a caller states the intent - "route the
+	// directory through my proxy" - without having to know or duplicate how
+	// that proxy is addressed, which is what the app used to do.
+	DirectoryViaProxy bool `yaml:"directory-via-proxy,omitempty" json:"directory-via-proxy,omitempty"`
 	// discovery is the directory's answer for a block that lists no device,
 	// read before the configuration was parsed by ResolveMeshDiscovery.
 	//
@@ -163,6 +235,11 @@ func expandMesh(rawCfg *RawConfig) error {
 	if mesh == nil {
 		return nil
 	}
+	// The proxy the directory's own requests take is this node's mixed-port
+	// inbound when the block asks for one; the address and the credentials are
+	// properties of the running configuration, so they are resolved here rather
+	// than written into a profile by whoever built it.
+	mesh.DirectoryProxy = meshDirectoryProxy(mesh, rawCfg)
 	// A resolved block carries its list already, even when that list is
 	// empty; an unresolved one has to be worth reading from the directory.
 	if len(mesh.Devices) == 0 && !mesh.DirectoryResolved && !meshDiscoveryConfigured(mesh) {
@@ -221,14 +298,8 @@ func expandMesh(rawCfg *RawConfig) error {
 		if mesh.DirectoryToken != "" {
 			mapping["directory-token"] = mesh.DirectoryToken
 		}
-		if mesh.DirectoryID != "" {
-			mapping["directory-id"] = mesh.DirectoryID
-		}
-		if mesh.DeviceName != "" {
-			mapping["hostname"] = mesh.DeviceName
-		}
-		if mesh.DeviceOS != "" {
-			mapping["os"] = mesh.DeviceOS
+		for key, value := range meshIdentityFields(mesh) {
+			mapping[key] = value
 		}
 		if mesh.Heartbeat > 0 {
 			mapping["heartbeat"] = mesh.Heartbeat
@@ -290,14 +361,8 @@ func buildMeshEntry(mesh *RawMesh, domains map[string]string, port int) map[stri
 	if mesh.DirectoryToken != "" {
 		mapping["directory-token"] = mesh.DirectoryToken
 	}
-	if mesh.DirectoryID != "" {
-		mapping["directory-id"] = mesh.DirectoryID
-	}
-	if mesh.DeviceName != "" {
-		mapping["hostname"] = mesh.DeviceName
-	}
-	if mesh.DeviceOS != "" {
-		mapping["os"] = mesh.DeviceOS
+	for key, value := range meshIdentityFields(mesh) {
+		mapping[key] = value
 	}
 	if mesh.Heartbeat > 0 {
 		mapping["heartbeat"] = mesh.Heartbeat

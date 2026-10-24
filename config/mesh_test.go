@@ -3,10 +3,12 @@ package config
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
+	meshident "github.com/metacubex/mihomo/component/mesh"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -104,10 +106,15 @@ func TestExpandMeshReportsTheNameAndSystemTheAppRead(t *testing.T) {
 	assert.Equal(t, "Android 14", entry["os"])
 }
 
-func TestExpandMeshSendsNoNameWhenTheAppWroteNone(t *testing.T) {
-	// The fields are the app's to write: a profile that ran through an app
-	// that did not know them, or a hand-written one, reports the system host
-	// name alone - the core sends nothing for either.
+func TestExpandMeshDerivesTheIdentityWhenTheProfileNamesNone(t *testing.T) {
+	// One profile runs on every device, so a per-device field left empty is
+	// filled from the machine itself: the id it derives, its own host name and
+	// the system it runs. The app used to do this before the core parsed -
+	// computing an id, reading the host name, injecting all three - which is
+	// the half of the mesh that is moving in here.
+	meshident.SetHostIdentity("4C4C4544-0042-3510-8057-B4C04F4E4E32", "Test OS")
+	t.Cleanup(meshident.ResetHostIdentity)
+
 	rawCfg := &RawConfig{
 		Mesh: &RawMesh{
 			DirectoryURL: "https://hub.example",
@@ -118,10 +125,54 @@ func TestExpandMeshSendsNoNameWhenTheAppWroteNone(t *testing.T) {
 	if err := expandMesh(rawCfg); err != nil {
 		t.Fatal(err)
 	}
-	_, hasName := rawCfg.Proxy[0]["hostname"]
-	_, hasOS := rawCfg.Proxy[0]["os"]
-	assert.False(t, hasName)
-	assert.False(t, hasOS)
+	wantID := meshident.DeriveOn(runtime.GOOS, "4C4C4544-0042-3510-8057-B4C04F4E4E32").ID
+	assert.Equal(t, wantID, rawCfg.Proxy[0]["directory-id"])
+	assert.Equal(t, "Test OS", rawCfg.Proxy[0]["os"])
+	name, _ := rawCfg.Proxy[0]["hostname"].(string)
+	assert.NotEmpty(t, name, "the host name should be reported")
+}
+
+func TestExpandMeshStillLetsTheProfileNameTheDevice(t *testing.T) {
+	// A profile that does name them wins: an operator renaming a device from
+	// the dashboard is a deliberate act, not a value to be overwritten by the
+	// machine underneath it.
+	rawCfg := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL: "https://hub.example",
+			DirectoryID:  "chosen-id",
+			DeviceName:   "小明的手机",
+			DeviceOS:     "Android 14",
+			Proxy:        map[string]any{"type": "direct"},
+			Devices:      []RawMeshDevice{{Name: "pc"}},
+		},
+	}
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, "chosen-id", rawCfg.Proxy[0]["directory-id"])
+	assert.Equal(t, "小明的手机", rawCfg.Proxy[0]["hostname"])
+	assert.Equal(t, "Android 14", rawCfg.Proxy[0]["os"])
+}
+
+func TestMeshDirectoryProxyIsBuiltFromTheNodesOwnInbound(t *testing.T) {
+	// The app used to build this URL and write it into the profile. The port
+	// and the credentials are properties of the running configuration, so the
+	// core resolves them from what it is already doing.
+	rawCfg := &RawConfig{MixedPort: 7890, Authentication: []string{"u:secret"}}
+	block := &RawMesh{DirectoryViaProxy: true}
+	assert.Equal(t, "http://u:secret@127.0.0.1:7890", meshDirectoryProxy(block, rawCfg))
+
+	// An explicit URL wins: an operator may point the directory at a different
+	// proxy than this node's own inbound.
+	block.DirectoryProxy = "http://elsewhere:1080"
+	assert.Equal(t, "http://elsewhere:1080", meshDirectoryProxy(block, rawCfg))
+
+	// Nothing to build on: no mixed-port inbound, so no proxy rather than one
+	// that dials nowhere.
+	block.DirectoryProxy = ""
+	assert.Equal(t, "", meshDirectoryProxy(block, &RawConfig{}))
+	// Not asked for, not built.
+	assert.Equal(t, "", meshDirectoryProxy(&RawMesh{}, rawCfg))
 }
 
 func TestExpandMeshDefaultsThePortWhenNobodyNamesOne(t *testing.T) {
