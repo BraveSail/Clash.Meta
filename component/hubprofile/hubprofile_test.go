@@ -230,9 +230,22 @@ func TestTheCredentialMayArriveInsideTheUrl(t *testing.T) {
 		t.Fatalf("token = %q, want the configured one", both.Token)
 	}
 
-	// And a link with no token is still an incomplete block.
-	if err := (&Config{URL: "https://hub.example", ID: "x"}).Validate(); err == nil {
-		t.Error("a block with no credential anywhere validated")
+	// A link with no token is not incomplete: the device proves its id with its
+	// own key instead, which is what lets the token leave the profile.
+	keyless := &Config{URL: "https://hub.example", ID: "x"}
+	if err := keyless.Validate(); err != nil {
+		t.Fatalf("a device with its own key was refused: %v", err)
+	}
+	if len(keyless.SigningSeed) == 0 {
+		t.Error("validated without a token but did not pick up a signing key")
+	}
+	if keyless.Token != "" {
+		t.Errorf("token = %q, want none", keyless.Token)
+	}
+
+	// A block that names no id has no record to be given, whatever it holds.
+	if err := (&Config{URL: "https://hub.example"}).Validate(); err == nil {
+		t.Error("a block with neither id nor token validated")
 	}
 }
 

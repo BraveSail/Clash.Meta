@@ -34,6 +34,7 @@ import (
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 
+	meshident "github.com/metacubex/mihomo/component/mesh"
 	"github.com/metacubex/mihomo/common/yaml"
 	"github.com/metacubex/mihomo/component/dialer"
 	C "github.com/metacubex/mihomo/constant"
@@ -82,6 +83,10 @@ type Config struct {
 	// Keep is merged into every pulled YAML, last, so a device's own identity
 	// survives a profile shared with devices that differ.
 	Keep map[string]any `yaml:"keep,omitempty" json:"keep,omitempty"`
+	// SigningSeed replaces the token when the block carries none: the device
+	// proves its id with the key it keeps, the same way it proves it to the
+	// directory. Never written to a file.
+	SigningSeed []byte `yaml:"-" json:"-"`
 }
 
 // Enabled reports whether a profile block asks for anything at all. An absent
@@ -115,7 +120,13 @@ func (c *Config) Validate() error {
 		c.URL = stripped
 	}
 	if strings.TrimSpace(c.Token) == "" {
-		return errors.New("profile: token is required, the credential the hub accepts")
+		// No token: the device proves its id with its own key. A device that
+		// has neither cannot pull, and saying so here beats a loop of 401s.
+		if keys, err := meshident.LoadOrCreateKeys(""); err == nil {
+			c.SigningSeed = keys.Signing
+		} else {
+			return errors.New("profile: no token and no device key, so the hub cannot be asked")
+		}
 	}
 	if strings.TrimSpace(c.ID) == "" {
 		return errors.New("profile: id is required, the record this device answers to")
@@ -347,9 +358,15 @@ func (c *Client) watch(ctx context.Context, attempt way) error {
 	if err != nil {
 		return err
 	}
-	header := ws.HandshakeHeaderHTTP(http.Header{
-		"Authorization": []string{"Bearer " + c.config.Token},
-	})
+	headerValues := http.Header{}
+	if c.config.Token != "" {
+		headerValues.Set("Authorization", "Bearer "+c.config.Token)
+	} else if watched, err := url.Parse(target); err == nil {
+		for name, value := range meshident.SignRequest(c.config.SigningSeed, http.MethodGet, watched.Path, nil, c.config.ID, time.Now()) {
+			headerValues.Set(name, value)
+		}
+	}
+	header := ws.HandshakeHeaderHTTP(headerValues)
 	// The core's own dialer, or the tunnel, so reaching the hub does not
 	// depend on the tunnel the configuration being fetched would build.
 	//
@@ -482,7 +499,13 @@ func (c *Client) pullVia(ctx context.Context, attempt way, target string) error 
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+c.config.Token)
+	if c.config.Token != "" {
+		request.Header.Set("Authorization", "Bearer "+c.config.Token)
+	} else {
+		for header, value := range meshident.SignRequest(c.config.SigningSeed, request.Method, request.URL.Path, nil, c.config.ID, time.Now()) {
+			request.Header.Set(header, value)
+		}
+	}
 	c.mu.Lock()
 	etag := c.etag
 	c.mu.Unlock()
