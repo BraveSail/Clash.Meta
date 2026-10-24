@@ -51,6 +51,12 @@ type TailnetPeerOption struct {
 	// every device, so the app computes it per device from what the machine
 	// itself carries.
 	DirectoryID string `proxy:"directory-id,omitempty"`
+	// DirectoryUUID and DirectoryEncryption are the transport identity this
+	// node reports: the VLESS user it listens as and the public half of the
+	// key it listens with. They travel in the record so a peer can dial it
+	// without a key the whole mesh shares.
+	DirectoryUUID       string `proxy:"directory-uuid,omitempty"`
+	DirectoryEncryption string `proxy:"directory-encryption,omitempty"`
 	// DirectoryPeer is the name to ask the directory for; it defaults to [Peer],
 	// which may be an address the directory does not know.
 	DirectoryPeer string `proxy:"directory-peer,omitempty"`
@@ -152,6 +158,8 @@ func NewTailnetPeer(option TailnetPeerOption) (*TailnetPeer, error) {
 			Name:      option.Name + " directory",
 			URL:       option.DirectoryURL,
 			Token:     option.DirectoryToken,
+			UUID:       option.DirectoryUUID,
+			Encryption: option.DirectoryEncryption,
 			ID:        option.directoryID(),
 			Port:      option.Port,
 			Heartbeat: option.Heartbeat,

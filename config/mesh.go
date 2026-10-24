@@ -276,6 +276,7 @@ func expandMesh(rawCfg *RawConfig) error {
 		rawCfg.Listeners = append(rawCfg.Listeners, buildMeshListener(mesh.Listener, port))
 	}
 
+	identityUUID, _, identityEncryption := meshTransportIdentity(mesh)
 	for _, peer := range peers {
 		mapping := map[string]any{
 			"name":          peer.Name,
@@ -297,6 +298,8 @@ func expandMesh(rawCfg *RawConfig) error {
 		}
 		if mesh.DirectoryToken != "" {
 			mapping["directory-token"] = mesh.DirectoryToken
+			mapping["directory-uuid"] = identityUUID
+			mapping["directory-encryption"] = identityEncryption
 		}
 		for key, value := range meshIdentityFields(mesh) {
 			mapping[key] = value
@@ -361,6 +364,9 @@ func buildMeshEntry(mesh *RawMesh, domains map[string]string, port int) map[stri
 	if mesh.DirectoryToken != "" {
 		mapping["directory-token"] = mesh.DirectoryToken
 	}
+	identityUUID, _, identityEncryption := meshTransportIdentity(mesh)
+	mapping["directory-uuid"] = identityUUID
+	mapping["directory-encryption"] = identityEncryption
 	for key, value := range meshIdentityFields(mesh) {
 		mapping[key] = value
 	}

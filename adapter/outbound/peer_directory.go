@@ -118,6 +118,13 @@ type PeerDirectoryOption struct {
 	// OS is the system this node runs, e.g. "Android 14", shown by the
 	// directory beside the name. Empty sends nothing.
 	OS string `proxy:"os,omitempty"`
+	// UUID is the VLESS user this device listens as, and Encryption the public
+	// half of the key pair it listens with. Both are public by construction;
+	// together they let a peer dial this device with a key of its own instead
+	// of one the whole mesh shares. Empty sends nothing, which is what an
+	// older profile does.
+	UUID       string `proxy:"uuid,omitempty"`
+	Encryption string `proxy:"encryption,omitempty"`
 }
 
 // PeerDirectory keeps one node's address current in a directory service and
@@ -773,6 +780,12 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 	}
 	if addr != "" {
 		payload["addr"] = addr
+	}
+	if uuid := strings.TrimSpace(d.option.UUID); uuid != "" {
+		payload["uuid"] = uuid
+	}
+	if encryption := strings.TrimSpace(d.option.Encryption); encryption != "" {
+		payload["encryption"] = encryption
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
