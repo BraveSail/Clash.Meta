@@ -7,28 +7,41 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// platformMachineID reads the machine's own GUID, the same value the app used
-// to send: HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid. It survives
-// reinstalls and reboots and is unique per Windows installation.
+// platformMachineID reads the machine's own id: SQMClient\MachineId, the value
+// this deployment has always reported under.
+//
+// That key, not Cryptography\MachineGuid, is what the app read before the
+// derivation moved here, so the ids already recorded on the hub are hashes of
+// it - reading the other one would re-register every Windows device as new.
+// The GUID is the fallback for a system with no SQMClient key.
 //
 // WOW64_64KEY is asked for explicitly: a 32-bit build would otherwise be
-// redirected to the WOW6432Node view, which does not hold this key, and the
-// device would come up with no id at all.
+// redirected to the WOW6432Node view, which does not hold these keys.
 func platformMachineID() string {
-	key, err := registry.OpenKey(
-		registry.LOCAL_MACHINE,
-		`SOFTWARE\Microsoft\Cryptography`,
-		registry.QUERY_VALUE|registry.WOW64_64KEY,
-	)
-	if err != nil {
-		return ""
+	for _, probe := range []struct{ path, value string }{
+		{`SOFTWARE\Microsoft\SQMClient`, "MachineId"},
+		{`SOFTWARE\Microsoft\Cryptography`, "MachineGuid"},
+	} {
+		key, err := registry.OpenKey(
+			registry.LOCAL_MACHINE,
+			probe.path,
+			registry.QUERY_VALUE|registry.WOW64_64KEY,
+		)
+		if err != nil {
+			continue
+		}
+		value, _, err := key.GetStringValue(probe.value)
+		key.Close()
+		if err != nil {
+			continue
+		}
+		// Taken verbatim, braces included: the hash on the hub was computed
+		// over exactly this string.
+		if id := strings.TrimSpace(value); id != "" {
+			return id
+		}
 	}
-	defer key.Close()
-	value, _, err := key.GetStringValue("MachineGuid")
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(value)
+	return ""
 }
 
 // platformOSName is "Windows 11 Pro 23H2"-ish: the product name and the
