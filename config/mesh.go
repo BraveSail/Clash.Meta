@@ -421,12 +421,31 @@ func meshUUID(token string) string {
 // not even have a name. The keys are derived from the directory token the same
 // way the user is: every device holds that token, so every device arrives at
 // the same server key and the same client key, and any two of them can talk.
+// meshTransportIdentity answers the VLESS user and the encryption pair this
+// device listens and dials with.
+//
+// A mesh that carries a token keeps the shared derivation every device has
+// used: one user, one key pair, the token being the network's secret. A mesh
+// with no token uses the device's own key material instead - which is the
+// point of dropping the token, and why that key lives outside the profile.
+func meshTransportIdentity(mesh *RawMesh) (uuid, decryption, encryption string) {
+	if strings.TrimSpace(mesh.DirectoryToken) != "" {
+		decryption, encryption = meshEncryptionKeys(mesh.DirectoryToken)
+		return meshUUID(mesh.DirectoryToken), decryption, encryption
+	}
+	keys, err := meshident.LoadOrCreateKeys("")
+	if err != nil {
+		log.Errorln("[Mesh] cannot use the device key: %v", err)
+		return "", "", ""
+	}
+	return keys.UUID, keys.Decryption, keys.Encryption
+}
+
 func meshDerivedProtocols(mesh *RawMesh) (proxy, listener map[string]any) {
 	if len(mesh.Proxy) > 0 || meshListenerDefined(mesh) {
 		return nil, nil
 	}
-	uuid := meshUUID(mesh.DirectoryToken)
-	decryption, encryption := meshEncryptionKeys(mesh.DirectoryToken)
+	uuid, decryption, encryption := meshTransportIdentity(mesh)
 	return map[string]any{
 			"type":       meshDerivedProtocol,
 			"uuid":       uuid,

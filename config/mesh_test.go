@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
 	meshident "github.com/metacubex/mihomo/component/mesh"
+	"github.com/metacubex/mihomo/constant"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -946,4 +948,40 @@ func TestExpandMeshRefusesDisagreeingPortsWithoutAnId(t *testing.T) {
 		t.Fatal("a profile that cannot say which entry is its own accepted disagreeing ports")
 	}
 	assert.Contains(t, err.Error(), "directory-id")
+}
+
+
+func TestAMeshWithoutATokenUsesTheDevicesOwnKeys(t *testing.T) {
+	// The token is the network's shared secret. A mesh that does not carry one
+	// takes its transport identity from the device's own key material instead -
+	// which is what makes the token removable at all.
+	home := t.TempDir()
+	constant.SetHomeDir(home)
+	t.Cleanup(func() { constant.SetHomeDir("") })
+
+	rawCfg := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL: "https://hub.example",
+			Devices:      []RawMeshDevice{{Name: "pc"}},
+		},
+	}
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawCfg.Proxy) == 0 {
+		t.Fatal("no mesh peer was expanded")
+	}
+	entry := rawCfg.Proxy[0]
+	inner, ok := entry["proxy"].(map[string]any)
+	if !ok {
+		t.Fatalf("the peer carries no inner proxy: %v", entry)
+	}
+	uuid, _ := inner["uuid"].(string)
+	if len(uuid) != 36 {
+		t.Fatalf("uuid = %q", uuid)
+	}
+	encryption, _ := inner["encryption"].(string)
+	if !strings.HasPrefix(encryption, meshident.EncryptionPrefix+".0rtt.") {
+		t.Fatalf("encryption = %q", encryption)
+	}
 }
