@@ -23,6 +23,7 @@ import (
 
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/iface"
+	meshident "github.com/metacubex/mihomo/component/mesh"
 	"github.com/metacubex/mihomo/component/mesh"
 	"github.com/metacubex/mihomo/component/peerdirectory"
 	C "github.com/metacubex/mihomo/constant"
@@ -167,6 +168,12 @@ type PeerDirectory struct {
 	sentAt            time.Time
 	heartbeat         time.Duration
 	peers             map[string]cachedPeer
+	// signingSeed is this device's Ed25519 seed, used when no token is
+	// configured: the id names the device, this proves it.
+	signingSeed []byte
+	// registered records that the key has been handed to the directory once in
+	// this process, so a pending device does not re-register on every beat.
+	registered bool
 	warnedOnce        bool
 	// refreshMu guards refreshing, the set of ids a background refresh is
 	// already in flight for: a burst of connections that all find the same
@@ -275,6 +282,21 @@ func NewPeerDirectory(option PeerDirectoryOption) (*PeerDirectory, error) {
 	directory.loadPersistedPeers()
 	go directory.startUnderlayWatch()
 	go directory.run()
+	// A device with no token proves its id with a key instead. The key lives
+	// in the core's home, not in the profile: one profile runs everywhere.
+	if option.Token == "" {
+		if keys, err := meshident.LoadOrCreateKeys(""); err == nil {
+			directory.signingSeed = keys.Signing
+			if directory.option.UUID == "" {
+				directory.option.UUID = keys.UUID
+			}
+			if directory.option.Encryption == "" {
+				directory.option.Encryption = keys.Encryption
+			}
+		} else {
+			log.Errorln("[PeerDirectory](%s) cannot use the device key: %v", option.Name, err)
+		}
+	}
 	return directory, nil
 }
 
@@ -636,7 +658,7 @@ func (d *PeerDirectory) lookup(ctx context.Context, id string) (directoryAnswer,
 	if err != nil {
 		return directoryAnswer{}, err
 	}
-	d.authorize(request)
+	d.authorize(request, nil)
 	response, err := d.do(ctx, func() (*http.Request, error) {
 		attempt := request.Clone(ctx)
 		return attempt, nil
@@ -794,7 +816,57 @@ func orNone(addr string) string {
 	return addr
 }
 
+// ensureRegistered hands this device's public key to the directory, once per
+// process, when it has no token to prove itself with. Registration grants
+// nothing: the device stays pending until an operator approves it, and learns
+// it was let in by its next report succeeding.
+func (d *PeerDirectory) ensureRegistered(ctx context.Context) {
+	if d.option.Token != "" || len(d.signingSeed) == 0 {
+		return
+	}
+	d.mu.Lock()
+	done := d.registered
+	d.mu.Unlock()
+	if done {
+		return
+	}
+	payload := map[string]any{
+		"id":        d.option.ID,
+		"publicKey": meshident.PublicKeyBase64(d.signingSeed),
+	}
+	if hostname := strings.TrimSpace(d.option.Hostname); hostname != "" {
+		payload["name"] = hostname
+	}
+	if osName := strings.TrimSpace(d.option.OS); osName != "" {
+		payload["os"] = osName
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	response, err := d.do(ctx, func() (*http.Request, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(d.option.URL, "/")+"/register", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("content-type", "application/json")
+		return request, nil
+	})
+	if err != nil {
+		log.Debugln("[PeerDirectory](%s) could not register: %v", d.Name(), err)
+		return
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode/100 == 2 {
+		d.mu.Lock()
+		d.registered = true
+		d.mu.Unlock()
+		log.Infoln("[PeerDirectory](%s) registered %s with the directory; waiting to be approved", d.Name(), d.option.ID)
+	}
+}
+
 func (d *PeerDirectory) report(ctx context.Context, addr string) {
+	d.ensureRegistered(ctx)
 	payload := map[string]any{
 		"id":   d.option.ID,
 		"port": d.option.Port,
@@ -841,7 +913,7 @@ func (d *PeerDirectory) report(ctx context.Context, addr string) {
 			return nil, err
 		}
 		request.Header.Set("content-type", "application/json")
-		d.authorize(request)
+		d.authorize(request, body)
 		if etag != "" {
 			request.Header.Set("if-none-match", etag)
 		}
@@ -1034,9 +1106,18 @@ func localAddressesByInterface() map[string][]netip.Addr {
 	return addresses
 }
 
-func (d *PeerDirectory) authorize(request *http.Request) {
+// authorize proves who is asking. A token is the old way and still works; a
+// device with no token signs the request with the key it never sends.
+func (d *PeerDirectory) authorize(request *http.Request, body []byte) {
 	if d.option.Token != "" {
 		request.Header.Set("authorization", "Bearer "+d.option.Token)
+		return
+	}
+	if len(d.signingSeed) == 0 {
+		return
+	}
+	for header, value := range meshident.SignRequest(d.signingSeed, request.Method, request.URL.Path, body, d.option.ID, time.Now()) {
+		request.Header.Set(header, value)
 	}
 }
 
