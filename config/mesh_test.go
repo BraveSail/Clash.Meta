@@ -1044,3 +1044,4 @@ func TestTheListenerAcceptsTheDevicesItKnows(t *testing.T) {
 		t.Fatalf("token mesh users = %v, want the one shared user", sharedUsers)
 	}
 }
+
