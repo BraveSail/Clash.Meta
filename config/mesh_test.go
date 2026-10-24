@@ -985,3 +985,62 @@ func TestAMeshWithoutATokenUsesTheDevicesOwnKeys(t *testing.T) {
 		t.Fatalf("encryption = %q", encryption)
 	}
 }
+
+
+// With a key per device, a listener that accepted only its own user would
+// refuse every peer. It has to accept exactly the devices the directory listed.
+func TestTheListenerAcceptsTheDevicesItKnows(t *testing.T) {
+	home := t.TempDir()
+	constant.SetHomeDir(home)
+	t.Cleanup(func() { constant.SetHomeDir("") })
+
+	rawCfg := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL: "https://hub.example",
+			Devices: []RawMeshDevice{
+				{Name: "pc", UUID: "aaaa-1111"},
+				{Name: "gt7", UUID: "bbbb-2222"},
+			},
+		},
+	}
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawCfg.Listeners) == 0 {
+		t.Fatal("no listener was expanded")
+	}
+	listener := rawCfg.Listeners[0]
+	users, _ := listener["users"].([]any)
+	if len(users) != 3 {
+		t.Fatalf("users = %v, want this device plus the two it knows", users)
+	}
+	seen := map[string]bool{}
+	for _, entry := range users {
+		if user, ok := entry.(map[string]any); ok {
+			if uuid, ok := user["uuid"].(string); ok {
+				seen[uuid] = true
+			}
+		}
+	}
+	for _, want := range []string{"aaaa-1111", "bbbb-2222"} {
+		if !seen[want] {
+			t.Fatalf("the listener does not accept %q: %v", want, seen)
+		}
+	}
+
+	// Under a shared token every device is the same user: one entry, as before.
+	shared := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL:   "https://hub.example",
+			DirectoryToken: "secret",
+			Devices:        []RawMeshDevice{{Name: "gt7", UUID: "bbbb-2222"}},
+		},
+	}
+	if err := expandMesh(shared); err != nil {
+		t.Fatal(err)
+	}
+	sharedUsers, _ := shared.Listeners[0]["users"].([]any)
+	if len(sharedUsers) != 1 {
+		t.Fatalf("token mesh users = %v, want the one shared user", sharedUsers)
+	}
+}

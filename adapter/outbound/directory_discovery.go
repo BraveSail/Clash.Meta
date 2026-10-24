@@ -23,6 +23,11 @@ type DirectoryNode struct {
 	// Domain is the name a connection uses to reach this device, when someone
 	// set one on the dashboard. The mesh resolves a requested name through it.
 	Domain string
+	// UUID is the VLESS user this device listens as, and Encryption the public
+	// half of the key it listens with. Both are public; the mesh listener
+	// accepts exactly the devices in the directory, so it needs their users.
+	UUID       string
+	Encryption string
 }
 
 // FetchDirectoryNodes asks the directory for every device it holds. A mesh is
@@ -69,7 +74,9 @@ func FetchDirectoryNodes(ctx context.Context, rawURL, token string, timeout time
 			Port     int    `json:"port"`
 			Hostname string `json:"hostname"`
 			Alias    string `json:"alias"`
-			Domain   string `json:"domain"`
+			Domain     string `json:"domain"`
+			UUID       string `json:"uuid"`
+			Encryption string `json:"encryption"`
 		} `json:"nodes"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -87,7 +94,9 @@ func FetchDirectoryNodes(ctx context.Context, rawURL, token string, timeout time
 			Name:   directoryNodeName(node.Alias, node.Hostname, id),
 			Addr:   strings.TrimSpace(node.Addr),
 			Port:   node.Port,
-			Domain: strings.ToLower(strings.TrimSpace(node.Domain)),
+			Domain:     strings.ToLower(strings.TrimSpace(node.Domain)),
+			UUID:       strings.TrimSpace(node.UUID),
+			Encryption: strings.TrimSpace(node.Encryption),
 		})
 	}
 	return nodes, nil

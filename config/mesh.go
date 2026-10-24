@@ -127,6 +127,10 @@ type RawMeshDevice struct {
 	// dashboard cannot break a shared configuration. Empty for a device that
 	// is only reachable by its own outbound.
 	Domain string `yaml:"domain,omitempty" json:"domain,omitempty"`
+	// UUID is the transport user this device listens as, read from the
+	// directory. The listener accepts exactly these, so a mesh with a key per
+	// device still lets its own peers in.
+	UUID string `yaml:"uuid,omitempty" json:"uuid,omitempty"`
 	// Port is the port this device serves on and is dialled at. Every device
 	// takes the same value - a device reports one port to the directory - so
 	// writing it on the entries that differ from the default is enough.
@@ -447,6 +451,29 @@ func meshTransportIdentity(mesh *RawMesh) (uuid, decryption, encryption string) 
 	return keys.UUID, keys.Decryption, keys.Encryption
 }
 
+// meshListenerUsers answers who may connect to this device's listener.
+//
+// Under a shared token there is one user for the whole mesh, so this device's
+// own uuid is the answer. With a key per device every device listens as itself,
+// and a listener that accepted only its own user would refuse its peers - so it
+// accepts exactly the devices the directory listed.
+func meshListenerUsers(mesh *RawMesh, own string) []any {
+	users := []any{map[string]any{"uuid": own}}
+	if strings.TrimSpace(mesh.DirectoryToken) != "" {
+		return users
+	}
+	seen := map[string]bool{own: true}
+	for _, device := range mesh.Devices {
+		user := strings.TrimSpace(device.UUID)
+		if user == "" || seen[user] {
+			continue
+		}
+		seen[user] = true
+		users = append(users, map[string]any{"uuid": user})
+	}
+	return users
+}
+
 func meshDerivedProtocols(mesh *RawMesh) (proxy, listener map[string]any) {
 	if len(mesh.Proxy) > 0 || meshListenerDefined(mesh) {
 		return nil, nil
@@ -459,7 +486,7 @@ func meshDerivedProtocols(mesh *RawMesh) (proxy, listener map[string]any) {
 			"encryption": encryption,
 		}, map[string]any{
 			"type":       meshDerivedProtocol,
-			"users":      []any{map[string]any{"uuid": uuid}},
+			"users":      meshListenerUsers(mesh, uuid),
 			"decryption": decryption,
 		}
 }
