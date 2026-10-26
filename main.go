@@ -318,7 +318,10 @@ func hubBlockFromConfig() *hubprofile.Config {
 			log.Debugln("[Profile] the configuration could not be read for a hub block: %s", err.Error())
 			return nil
 		}
-		return raw.Hub
+		if raw.Hub != nil && raw.Hub.URL != "" {
+			return raw.Hub
+		}
+		return builtInHub()
 	}
 	buf, err := os.ReadFile(C.Path.Config())
 	if err != nil {
@@ -330,5 +333,8 @@ func hubBlockFromConfig() *hubprofile.Config {
 		log.Debugln("[Profile] the configuration file could not be read for a hub block: %s", err.Error())
 		return nil
 	}
-	return raw.Hub
+	if raw.Hub != nil && raw.Hub.URL != "" {
+		return raw.Hub
+	}
+	return builtInHub()
 }
