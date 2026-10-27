@@ -1,0 +1,62 @@
+package adapter
+
+import (
+	"strconv"
+	"sync"
+
+	"github.com/metacubex/mihomo/adapter/outbound"
+)
+
+// One directory client per (url, token, id, port, proxy): a shared profile lists
+// several peers of the same node, and each of them would otherwise report the
+// same address separately. The outbound's name is not part of the key - two
+// peers of one node share the client - while the port is, because it is what
+// the report publishes. A client that goes through a proxy is a different
+// client from one that does not, or a node would send its reports down a
+// transport it was never configured for.
+var directoryClients = struct {
+	sync.Mutex
+	clients map[string]*sharedDirectoryClient
+}{clients: map[string]*sharedDirectoryClient{}}
+
+type sharedDirectoryClient struct {
+	client *outbound.PeerDirectory
+	refs   int
+}
+
+func acquireDirectoryClient(option outbound.PeerDirectoryOption) (*outbound.PeerDirectory, error) {
+	key := option.URL + "\x00" + option.Token + "\x00" + option.ID + "\x00" + strconv.Itoa(option.Port) + "\x00" + option.ViaProxy
+
+	directoryClients.Lock()
+	if existing, ok := directoryClients.clients[key]; ok {
+		existing.refs++
+		directoryClients.Unlock()
+		return existing.client, nil
+	}
+	directoryClients.Unlock()
+
+	client, err := outbound.NewPeerDirectory(option)
+	if err != nil {
+		return nil, err
+	}
+	directoryClients.Lock()
+	directoryClients.clients[key] = &sharedDirectoryClient{client: client, refs: 1}
+	directoryClients.Unlock()
+	return client, nil
+}
+
+func releaseDirectoryClient(client *outbound.PeerDirectory) {
+	directoryClients.Lock()
+	defer directoryClients.Unlock()
+	for key, entry := range directoryClients.clients {
+		if entry.client != client {
+			continue
+		}
+		entry.refs--
+		if entry.refs <= 0 {
+			delete(directoryClients.clients, key)
+			_ = client.Close()
+		}
+		return
+	}
+}

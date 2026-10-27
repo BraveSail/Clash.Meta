@@ -18,6 +18,7 @@ import (
 	"github.com/metacubex/mihomo/common/orderedmap"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/common/yaml"
+	"github.com/metacubex/mihomo/component/hubprofile"
 	"github.com/metacubex/mihomo/component/age"
 	"github.com/metacubex/mihomo/component/auth"
 	"github.com/metacubex/mihomo/component/cidr"
@@ -402,6 +403,13 @@ type RawTLS struct {
 }
 
 type RawConfig struct {
+	// Mesh is the shared half of a set of peer-directory devices: it expands to
+	// one tailnet-peer outbound per device (see mesh.go), so `proxies` keeps
+	// naming only what a person wrote.
+	Mesh *RawMesh `yaml:"mesh,omitempty" json:"mesh,omitempty"`
+	// Hub keeps this device's configuration in step with the hub that owns
+	// it: pulled at start, and pushed whenever the dashboard saves.
+	Hub *hubprofile.Config `yaml:"hub,omitempty" json:"hub,omitempty"`
 	Port                          int                     `yaml:"port" json:"port"`
 	SocksPort                     int                     `yaml:"socks-port" json:"socks-port"`
 	RedirPort                     int                     `yaml:"redir-port" json:"redir-port"`
@@ -623,6 +631,13 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 }
 
 func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
+	// The mesh block stands for per-device outbounds; expand it before anything
+	// reads proxies, so the rest of the parse sees what a person would have
+	// written by hand.
+	if err := expandMesh(rawCfg); err != nil {
+		return nil, err
+	}
+
 	config := &Config{}
 	log.Infoln("Start initial configuration in progress") //Segment finished in xxm
 	startTime := time.Now()

@@ -55,6 +55,8 @@ const (
 	ZeroTier
 	EasyTier
 	GostRelay
+	TailnetPeer
+	PeerDirectory
 )
 
 const (
@@ -157,6 +159,70 @@ type DelayHistory struct {
 	Delay uint16    `json:"delay"`
 }
 
+
+// ICMPProxy is implemented by an adapter that can move an ICMP echo to the
+// destination the rules selected. The L3 tunnels write the packet into their
+// own device; a protocol with an ICMP extension (VLESS, in this fork) asks the
+// peer to put the echo on the wire and streams the reply back. An adapter that
+// does not implement this leaves ICMP to the handler's DIRECT or fake-echo
+// paths, which is what every outbound did before.
+//
+// The messages are ICMP messages without an IP header: the carrier owns the
+// header, because only it knows which stack will finally answer.
+type ICMPProxy interface {
+	ExchangeICMP(ctx context.Context, metadata *Metadata, request []byte) ([]byte, error)
+}
+
+// ICMPRedirect is implemented by a carrier that cannot move an echo itself but
+// knows which address can - a peer, for instance, is reachable at the address
+// the directory publishes for it. The flow keeps the tool's own message and
+// runs the direct path to that address, and the answer is written back as the
+// address the tool pinged. A carrier that answers with no address keeps the
+// echo and carries it itself (see ICMPProxy).
+type ICMPRedirect interface {
+	ICMPDestination(ctx context.Context, metadata *Metadata) (netip.Addr, error)
+}
+
+// ProxyAdapterWrapper is implemented by an adapter that decorates another one.
+// The decorator embeds the ProxyAdapter interface, so an optional interface the
+// adapter underneath implements - ICMPProxy, for one - cannot be reached by a
+// type assertion on the decorator; it is reached from here instead.
+type ProxyAdapterWrapper interface {
+	WrappedProxyAdapter() ProxyAdapter
+}
+
+// ICMPCarrierOf answers whether an adapter can carry an echo, looking through
+// the decorators that hide it.
+func ICMPCarrierOf(adapter ProxyAdapter) (ICMPProxy, bool) {
+	for depth := 0; adapter != nil && depth < 8; depth++ {
+		if carrier, ok := adapter.(ICMPProxy); ok {
+			return carrier, true
+		}
+		wrapper, ok := adapter.(ProxyAdapterWrapper)
+		if !ok {
+			break
+		}
+		adapter = wrapper.WrappedProxyAdapter()
+	}
+	return nil, false
+}
+
+// ICMPRedirectOf answers whether an adapter names the address an echo aimed at
+// it has to travel to, looking through the decorators that hide it.
+func ICMPRedirectOf(adapter ProxyAdapter) (ICMPRedirect, bool) {
+	for depth := 0; adapter != nil && depth < 8; depth++ {
+		if redirect, ok := adapter.(ICMPRedirect); ok {
+			return redirect, true
+		}
+		wrapper, ok := adapter.(ProxyAdapterWrapper)
+		if !ok {
+			break
+		}
+		adapter = wrapper.WrappedProxyAdapter()
+	}
+	return nil, false
+}
+
 type ProxyState struct {
 	Alive   bool           `json:"alive"`
 	History []DelayHistory `json:"history"`
@@ -239,6 +305,10 @@ func (at AdapterType) String() string {
 		return "Tailscale"
 	case ZeroTier:
 		return "ZeroTier"
+	case TailnetPeer:
+		return "TailnetPeer"
+	case PeerDirectory:
+		return "PeerDirectory"
 	case EasyTier:
 		return "EasyTier"
 	case GostRelay:

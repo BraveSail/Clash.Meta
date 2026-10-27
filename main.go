@@ -234,6 +234,14 @@ func main() {
 		}
 	}
 
+	// A device that names a hub - in its configuration, or in the build it
+	// runs - takes its configuration from there and keeps taking it: pulled
+	// now, and pushed when the dashboard saves. Without this the core reads
+	// its file once, so a box running it alone can only be reconfigured by
+	// hand and by restart.
+	stopProfile := startHubProfile()
+	defer stopProfile()
+
 	defer executor.Shutdown()
 
 	termSign := make(chan os.Signal, 1)

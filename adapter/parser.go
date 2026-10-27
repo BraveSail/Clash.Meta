@@ -62,6 +62,20 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 			break
 		}
 		proxy, err = outbound.NewVmess(*vmessOption)
+	case "tailnet-peer":
+		tailnetPeerOption := &TailnetPeerOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, tailnetPeerOption)
+		if err != nil {
+			break
+		}
+		proxy, err = NewTailnetPeer(*tailnetPeerOption)
+	case "peer-directory":
+		peerDirectoryOption := &outbound.PeerDirectoryOption{BasicOption: basicOption}
+		err = decoder.Decode(mapping, peerDirectoryOption)
+		if err != nil {
+			break
+		}
+		proxy, err = outbound.NewPeerDirectory(*peerDirectoryOption)
 	case "vless":
 		vlessOption := &outbound.VlessOption{BasicOption: basicOption}
 		err = decoder.Decode(mapping, vlessOption)
