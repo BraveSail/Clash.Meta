@@ -247,13 +247,16 @@ func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.
 		return nil, errors.New("tailnet-peer: " + miss)
 	}
 	key := t.recordKey(requestedHost(metadata))
-	if _, _, self, err := t.resolveFor(ctx, requestedHost(metadata)); err != nil {
+	if addr, port, self, err := t.resolveFor(ctx, requestedHost(metadata)); err != nil {
+		noteDialFailureToDisk(requestedHost(metadata), metadata.DstPort, err)
 		return nil, err
 	} else if self {
 		if conn, err := t.dialLocalService(ctx, metadata); err == nil {
 			return conn, nil
 		}
 		return t.direct.DialContext(ctx, metadata)
+	} else {
+		log.Debugln("[Mesh] %s:%d resolves to %s:%d", requestedHost(metadata), metadata.DstPort, addr, port)
 	}
 
 	proxy, err := t.proxyForDial(ctx, requestedHost(metadata))
