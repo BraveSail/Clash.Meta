@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -241,6 +243,7 @@ func (t *TailnetPeer) innerMapping(host string, port int, peerKey string) map[st
 func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	if miss, ok := t.meshNameMiss(requestedHost(metadata)); ok {
 		log.Warnln("[Mesh] %s", miss)
+		noteDialFailureToDisk(requestedHost(metadata), metadata.DstPort, errors.New(miss))
 		return nil, errors.New("tailnet-peer: " + miss)
 	}
 	key := t.recordKey(requestedHost(metadata))
@@ -255,12 +258,14 @@ func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.
 
 	proxy, err := t.proxyForDial(ctx, requestedHost(metadata))
 	if err != nil {
+		noteDialFailureToDisk(requestedHost(metadata), metadata.DstPort, err)
 		return nil, err
 	}
 	conn, err := proxy.DialContext(ctx, metadata)
 	if err != nil {
 		t.invalidate()
 		t.noteDialFailure(key, err)
+		noteDialFailureToDisk(requestedHost(metadata), metadata.DstPort, err)
 		return nil, err
 	}
 	// The connection is counted while it is open, and the count is what makes
@@ -625,4 +630,32 @@ func (t *TailnetPeer) Close() error {
 		_ = t.direct.Close()
 	}
 	return nil
+}
+
+// dialFailureLog is where a failed dial is written.
+//
+// The app shows the core's log while it is open and forgets it when it closes,
+// and the core itself runs under a service account whose stderr nobody keeps.
+// A mesh that cannot reach a peer is worth more than that: the line names the
+// peer, the address tried and the error, in a file that outlives both.
+func dialFailureLog() string {
+	home := strings.TrimSpace(C.Path.HomeDir())
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "mesh-dial.log")
+}
+
+func noteDialFailureToDisk(host string, port uint16, err error) {
+	path := dialFailureLog()
+	if path == "" {
+		return
+	}
+	line := fmt.Sprintf("%s  dial %s:%d  %v\n", time.Now().Format(time.RFC3339), host, port, err)
+	file, openErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if openErr != nil {
+		return
+	}
+	_, _ = file.WriteString(line)
+	_ = file.Close()
 }
