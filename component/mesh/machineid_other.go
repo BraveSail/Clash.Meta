@@ -1,17 +1,11 @@
-//go:build !windows && !linux && !darwin && !android
+//go:build !linux && !darwin && !windows && !android
 
 package mesh
 
 import "runtime"
 
-// platformMachineID has no portable answer on this platform. The identity is
-// then empty, and the directory shows the device by the name it reports; a
-// made-up id would be worse, because two machines would eventually make up the
-// same one.
-func platformMachineID() string {
-	return ""
-}
-
+// platformOSName is the system this build runs on, for platforms without a
+// prettier answer than Go's own name.
 func platformOSName() string {
 	return runtime.GOOS
 }

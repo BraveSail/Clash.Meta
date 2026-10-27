@@ -1,80 +1,49 @@
 package mesh
 
 import (
-	"runtime"
+	"bytes"
 	"testing"
 )
 
-func platformOfThisBuild() string { return runtime.GOOS }
+// The id is the key's name: two seeds differ, the same seed agrees, and the
+// answer is a DNS label so a rule and a lookup can carry it.
+func TestTheIDIsTheKeysName(t *testing.T) {
+	a := bytes.Repeat([]byte{1}, 32)
+	b := bytes.Repeat([]byte{2}, 32)
 
-// The derivation is pinned by value, not recomputed: the ids on the hub are
-// hashes of this exact construction, so a changed platform name, separator or
-// truncation would silently re-register every device as a new one.
-func TestDeviceIDMatchesTheDirectorysExistingIds(t *testing.T) {
-	cases := []struct {
-		platform  string
-		machineID string
-		want      string
-	}{
-		{"windows", "4C4C4544-0042-3510-8057-B4C04F4E4E32", "95f2fe2623a9"},
-		{"android", "9774d56d682e549c", "2362a31b1b50"},
-		{"linux", "0123456789abcdef0123456789abcdef", "0434c62c29ad"},
+	if DeriveOn(a) == "" || DeriveOn(b) == "" {
+		t.Fatal("a seed produced no id")
 	}
-	for _, c := range cases {
-		t.Run(c.platform, func(t *testing.T) {
-			if got := DeriveOn(c.platform, c.machineID).ID; got != c.want {
-				t.Fatalf("DeriveOn(%q) = %q, want %q", c.platform, got, c.want)
-			}
-		})
+	if DeriveOn(a) != DeriveOn(a) {
+		t.Fatal("the same seed produced two ids")
+	}
+	if DeriveOn(a) == DeriveOn(b) {
+		t.Fatal("two seeds produced one id")
+	}
+	if got := DeriveOn(a); len(got) != deviceIDLength {
+		t.Fatalf("id %q is %d chars, want %d", got, len(got), deviceIDLength)
 	}
 }
 
-// A machine that cannot read its id gets no id. An empty id is skipped when the
-// mesh block is expanded, so the device still joins; a made-up one would let
-// two devices collide in the directory.
-func TestNoMachineIDMeansNoID(t *testing.T) {
-	for _, machineID := range []string{"", "   "} {
-		if got := DeriveOn("android", machineID).ID; got != "" {
-			t.Fatalf("DeriveOn(%q) = %q, want empty", machineID, got)
+// A seed that is not a signing seed has no name, and a device that cannot read
+// its key must not invent one: two devices inventing the same way would collide
+// in the directory.
+func TestAShortSeedHasNoID(t *testing.T) {
+	for _, seed := range [][]byte{nil, {}, bytes.Repeat([]byte{7}, 16)} {
+		if got := DeriveOn(seed); got != "" {
+			t.Fatalf("DeriveOn(%d bytes) = %q, want empty", len(seed), got)
 		}
 	}
 }
 
-// The id is a DNS label: a rule and a lookup both carry it.
-func TestDerivedIDIsALabel(t *testing.T) {
-	id := DeriveOn("android", "some-machine").ID
-	if len(id) != deviceIDLength {
-		t.Fatalf("id %q has length %d, want %d", id, len(id), deviceIDLength)
-	}
-	for _, r := range id {
-		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
-			t.Fatalf("id %q is not a lower-case hex label", id)
+// The id must not move when nothing about the key changed: the directory knows
+// devices by it, and a drifting id re-registers a device as a new one.
+func TestTheIDDoesNotDependOnTheHost(t *testing.T) {
+	seed := bytes.Repeat([]byte{9}, 32)
+	first := DeriveOn(seed)
+	for i := 0; i < 3; i++ {
+		if DeriveOn(seed) != first {
+			t.Fatal("the id changed between calls")
 		}
-	}
-}
-
-// What the platform layer hands over wins over the probe, which is the whole
-// point of the injection on Android: the app's bridge reads ANDROID_ID there.
-func TestInjectedHostIdentityWins(t *testing.T) {
-	ResetHostIdentity()
-	defer ResetHostIdentity()
-	SetHostIdentity("9774d56d682e549c", "Android 14")
-	identity := Derive()
-	if identity.OS != "Android 14" {
-		t.Fatalf("OS = %q, want the injected one", identity.OS)
-	}
-	if identity.ID != DeriveOn(platformOfThisBuild(), "9774d56d682e549c").ID {
-		t.Fatalf("ID = %q, want the id derived from the injected machine id", identity.ID)
-	}
-}
-
-// The name is the host's own, and an empty one is left to the directory to
-// fill in rather than replaced with a placeholder.
-func TestDeriveCarriesTheHostName(t *testing.T) {
-	ResetHostIdentity()
-	defer ResetHostIdentity()
-	SetHostIdentity("machine", "Some OS")
-	if name := Derive().Name; name == "" {
-		t.Fatal("expected the host name to be reported")
 	}
 }

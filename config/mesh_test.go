@@ -3,7 +3,6 @@ package config
 import (
 	"context"
 	"errors"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -110,12 +109,8 @@ func TestExpandMeshReportsTheNameAndSystemTheAppRead(t *testing.T) {
 
 func TestExpandMeshDerivesTheIdentityWhenTheProfileNamesNone(t *testing.T) {
 	// One profile runs on every device, so a per-device field left empty is
-	// filled from the machine itself: the id it derives, its own host name and
-	// the system it runs. The app used to do this before the core parsed -
-	// computing an id, reading the host name, injecting all three - which is
-	// the half of the mesh that is moving in here.
-	meshident.SetHostIdentity("4C4C4544-0042-3510-8057-B4C04F4E4E32", "Test OS")
-	t.Cleanup(meshident.ResetHostIdentity)
+	// filled from the device itself: the id its key makes, its own host name
+	// and the system it runs.
 
 	rawCfg := &RawConfig{
 		Mesh: &RawMesh{
@@ -127,9 +122,9 @@ func TestExpandMeshDerivesTheIdentityWhenTheProfileNamesNone(t *testing.T) {
 	if err := expandMesh(rawCfg); err != nil {
 		t.Fatal(err)
 	}
-	wantID := meshident.DeriveOn(runtime.GOOS, "4C4C4544-0042-3510-8057-B4C04F4E4E32").ID
+	wantID := meshident.Derive().ID
 	assert.Equal(t, wantID, rawCfg.Proxy[0]["directory-id"])
-	assert.Equal(t, "Test OS", rawCfg.Proxy[0]["os"])
+	assert.NotEmpty(t, rawCfg.Proxy[0]["os"], "the system should be reported")
 	name, _ := rawCfg.Proxy[0]["hostname"].(string)
 	assert.NotEmpty(t, name, "the host name should be reported")
 }

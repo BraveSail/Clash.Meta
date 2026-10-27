@@ -1,12 +1,11 @@
 package mesh
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
-	"runtime"
 	"strings"
-	"sync"
 )
 
 // Identity is what this device reports to the peer directory: the id the
@@ -27,52 +26,42 @@ type Identity struct {
 // a rule and a lookup can carry it.
 const deviceIDLength = 12
 
-var (
-	identityOnce    sync.Once
-	identityMachine string
-	identityOS      string
-)
-
-// SetHostIdentity records what only the platform layer can answer, on the
-// systems where the machine id is not reachable from Go.
+// Derive answers this device's identity: the name its key makes, the host name
+// the system reports, and the system it runs.
 //
-// Android is the case: ANDROID_ID lives behind a Java API, so the JNI bridge
-// reads it and hands it over before any configuration is parsed. Anything set
-// here wins over the probe; an empty value leaves the probe in charge.
-func SetHostIdentity(machineID, osName string) {
-	identityMachine = strings.TrimSpace(machineID)
-	identityOS = strings.TrimSpace(osName)
-}
-
-// Derive answers this device's identity.
-//
-// The id is a hash of the platform and the machine id, truncated to a DNS
-// label: stable across restarts, different between devices, and carrying none
-// of the raw machine id. A platform that reports no machine id yields an empty
-// id rather than a random one - a device that cannot prove which one it is
-// must not claim to be some other.
+// The id comes from the key and from nothing else. A machine id - ANDROID_ID,
+// MachineGuid, /etc/machine-id - is a name the system gives itself: anything on
+// the host can read it, it says nothing about who is asking, and it is exactly
+// what a clone copies. The key never leaves the device, and the id derived from
+// it is the thing the signature already proves, so the name and the proof are
+// one fact rather than two that can disagree.
 func Derive() Identity {
-	machineID, osName := hostIdentity()
 	return Identity{
-		ID:   deviceID(runtime.GOOS, machineID),
+		ID:   keyedID(),
 		Name: deviceName(),
-		OS:   osName,
+		OS:   platformOSName(),
 	}
 }
 
-// DeriveOn answers the identity a given platform and machine id produce, so the
-// derivation can be pinned by a test without depending on the machine running
-// it.
-func DeriveOn(platform, machineID string) Identity {
-	return Identity{ID: deviceID(platform, machineID)}
-}
-
-func deviceID(platform, machineID string) string {
-	machineID = strings.TrimSpace(machineID)
-	if machineID == "" {
+// keyedID is the name a device answers to when the machine cannot tell it what
+// it is: derived from the public half of the key it keeps, and therefore
+// different for every device and stable across restarts.
+func keyedID() string {
+	keys, err := LoadOrCreateKeys("")
+	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(platform + ":" + machineID))
+	return DeriveOn(keys.Signing)
+}
+
+// DeriveOn answers the id a given signing seed produces, so the derivation can
+// be pinned by a test without depending on the key stored on this machine.
+func DeriveOn(seed []byte) string {
+	if len(seed) != ed25519.SeedSize {
+		return ""
+	}
+	public := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	sum := sha256.Sum256(append([]byte("key:"), public...))
 	return hex.EncodeToString(sum[:])[:deviceIDLength]
 }
 
@@ -87,22 +76,3 @@ func deviceName() string {
 	return strings.TrimSpace(name)
 }
 
-func hostIdentity() (string, string) {
-	identityOnce.Do(func() {
-		if identityMachine == "" {
-			identityMachine = platformMachineID()
-		}
-		if identityOS == "" {
-			identityOS = platformOSName()
-		}
-	})
-	return identityMachine, identityOS
-}
-
-// ResetHostIdentity drops the memo. It exists for tests, the way the rest of
-// this package's seams do - nothing in production has a reason to call it.
-func ResetHostIdentity() {
-	identityOnce = sync.Once{}
-	identityMachine = ""
-	identityOS = ""
-}

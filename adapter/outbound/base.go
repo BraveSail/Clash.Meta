@@ -376,6 +376,13 @@ type autoCloseProxyAdapter struct {
 	closeErr  error
 }
 
+// WrappedProxyAdapter exposes the adapter this one decorates, so an optional
+// interface the adapter underneath implements - ICMPProxy, for one - is still
+// reachable from outside the decorator.
+func (p *autoCloseProxyAdapter) WrappedProxyAdapter() C.ProxyAdapter {
+	return p.ProxyAdapter
+}
+
 func (p *autoCloseProxyAdapter) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
 	c, err := p.ProxyAdapter.DialContext(ctx, metadata)
 	if err != nil {
