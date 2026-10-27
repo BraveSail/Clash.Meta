@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -238,6 +239,10 @@ func (t *TailnetPeer) innerMapping(host string, port int, peerKey string) map[st
 }
 
 func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	if miss, ok := t.meshNameMiss(requestedHost(metadata)); ok {
+		log.Warnln("[Mesh] %s", miss)
+		return nil, errors.New("tailnet-peer: " + miss)
+	}
 	key := t.recordKey(requestedHost(metadata))
 	if _, _, self, err := t.resolveFor(ctx, requestedHost(metadata)); err != nil {
 		return nil, err
@@ -324,6 +329,38 @@ func (t *TailnetPeer) recordKey(host string) string {
 		return id
 	}
 	return t.directoryNameKey()
+}
+
+// meshNameMiss answers whether a name was meant for this mesh but is not in it.
+//
+// Falling back to the node's own record for such a name made a missing device
+// look like a refused port: the connection was dialled somewhere else and the
+// only thing left to see was the proxy's generic failure. A name that carries
+// this mesh's suffix and is not in its map is a configuration fact, and saying
+// so is the difference between a five-minute fix and an afternoon.
+func (t *TailnetPeer) meshNameMiss(host string) (string, bool) {
+	if host == "" || len(t.option.Domains) == 0 {
+		return "", false
+	}
+	if _, ok := t.option.Domains[host]; ok {
+		return "", false
+	}
+	for name := range t.option.Domains {
+		suffix := name[strings.LastIndex(name, "."):]
+		if suffix != "" && strings.HasSuffix(host, suffix) {
+			known := make([]string, 0, len(t.option.Domains))
+			for candidate := range t.option.Domains {
+				known = append(known, candidate)
+			}
+			sort.Strings(known)
+			return fmt.Sprintf(
+				"no device answers to %q in this mesh (known names: %s)",
+				host,
+				strings.Join(known, ", "),
+			), true
+		}
+	}
+	return "", false
 }
 
 // dialLocalService reaches a service that runs on this node. The destination of
