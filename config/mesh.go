@@ -393,7 +393,12 @@ func buildMeshDomainRules(domains map[string]string) []string {
 		names = append(names, domain)
 	}
 	sort.Strings(names)
-	rules := make([]string, 0, len(names))
+	rules := make([]string, 0, len(names)+2)
+	// What a peer asks for is a service on itself, so it arrives addressed to
+	// loopback. Without these, that destination falls through to the catch-all
+	// rule and is sent out through a proxy - the stream then waits on a remote
+	// server for a service that was local all along.
+	rules = append(rules, "IPCIDR,127.0.0.0/8,DIRECT", "IPCIDR,::1/128,DIRECT")
 	for _, domain := range names {
 		rules = append(rules, "DOMAIN,"+domain+","+meshEntryName)
 	}
