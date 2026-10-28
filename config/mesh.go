@@ -277,7 +277,14 @@ func expandMesh(rawCfg *RawConfig) error {
 	// hand keeps doing that, and a profile written before this half existed
 	// keeps loading.
 	if meshListenerDefined(mesh) {
-		rawCfg.Listeners = append(rawCfg.Listeners, buildMeshListener(mesh.Listener, port))
+		listener := buildMeshListener(mesh.Listener, port)
+		rawCfg.Listeners = append(rawCfg.Listeners, listener)
+		// A listener that never binds leaves a device that reports itself at a
+		// port nobody can open, and nothing in the log would say so: the peers
+		// simply wait forever on a connection that was never accepted.
+		log.Infoln("[Mesh] listener %q on %v:%v (%v user(s))", listener["name"], listener["listen"], listener["port"], listenerUserCount(listener))
+	} else {
+		log.Infoln("[Mesh] this profile brings its own listeners; the mesh adds none")
 	}
 
 	identityUUID, _, identityEncryption := meshTransportIdentity(mesh)
@@ -689,4 +696,13 @@ func meshPort(mesh *RawMesh) (int, error) {
 		fallback = meshDefaultPort
 	}
 	return fallback, nil
+}
+
+// listenerUserCount answers how many users a mesh listener accepts, for a log
+// line that says whether anyone was let in at all.
+func listenerUserCount(listener map[string]any) int {
+	if users, ok := listener["users"].([]any); ok {
+		return len(users)
+	}
+	return 0
 }
