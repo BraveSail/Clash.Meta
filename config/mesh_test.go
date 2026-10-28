@@ -10,6 +10,7 @@ import (
 	"github.com/metacubex/mihomo/adapter/outbound"
 	meshident "github.com/metacubex/mihomo/component/mesh"
 	"github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/rules"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -1040,3 +1041,32 @@ func TestTheListenerAcceptsTheDevicesItKnows(t *testing.T) {
 	}
 }
 
+// A rule this core cannot parse is refused as a whole profile, which leaves
+// every device with no proxies at all - far worse than the mesh not working.
+// The strings the mesh writes are therefore run through the same parser the
+// profile goes through.
+func TestExpandMeshWritesRulesTheParserAccepts(t *testing.T) {
+	stubDiscovery(t, nil, errors.New("the directory must not be read during the parse"))
+
+	rawCfg := discoveredMesh([]RawMeshDevice{
+		{Name: "PC", ID: "a1b2c3d4e5f6", Domain: "pc.lan"},
+		{Name: "gt7", ID: "0f1e2d3c4b5a", Domain: "gt7.lan"},
+	})
+	rawCfg.Mesh.DirectoryResolved = true
+
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawCfg.Rule) == 0 {
+		t.Fatal("the mesh wrote no rules")
+	}
+	for _, rule := range rawCfg.Rule {
+		parts := strings.Split(rule, ",")
+		if len(parts) < 3 {
+			t.Fatalf("rule %q is not TYPE,PAYLOAD,TARGET", rule)
+		}
+		if _, err := rules.ParseRule(parts[0], parts[1], parts[2], parts[3:], nil); err != nil {
+			t.Fatalf("rule %q is refused by the parser: %v", rule, err)
+		}
+	}
+}
