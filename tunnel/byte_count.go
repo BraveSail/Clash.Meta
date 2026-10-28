@@ -19,6 +19,14 @@ type byteCounter struct {
 	n *int64
 }
 
+func newByteCounter(conn net.Conn) *byteCounter {
+	return &byteCounter{Conn: conn, n: new(int64)}
+}
+
+func (c *byteCounter) value() int64 {
+	return atomic.LoadInt64(c.n)
+}
+
 func (c *byteCounter) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
