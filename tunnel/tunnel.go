@@ -514,6 +514,18 @@ func loopbackService(metadata *C.Metadata) bool {
 	return metadata != nil && metadata.DstIP.IsLoopback()
 }
 
+// peekableFirstByte reports whether waiting for the client's first byte is safe.
+//
+// The peek exists to keep a TUN client's first packet whole: it is folded into
+// the first write to the remote, saving a packet. It must never stand in front of
+// the forward, because a proxy client is free to say nothing at all - an SSH
+// client happens to speak first, but a server-speaks-first protocol behind
+// CONNECT then waits forever on a banner already sitting in the peer's socket.
+// Only a TUN stream is known to arrive with data.
+func peekableFirstByte(metadata *C.Metadata) bool {
+	return metadata != nil && metadata.Type == C.TUN
+}
+
 func handleTCPConn(connCtx C.ConnContext) {
 	if !isHandle(connCtx.Metadata().Type) {
 		_ = connCtx.Conn().Close()
@@ -556,7 +568,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 	}
 
 	peekMutex := sync.Mutex{}
-	if !conn.Peeked() && !loopbackService(metadata) {
+	if !conn.Peeked() && peekableFirstByte(metadata) {
 		peekMutex.Lock()
 		go func() {
 			defer peekMutex.Unlock()

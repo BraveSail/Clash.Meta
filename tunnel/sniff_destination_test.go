@@ -43,3 +43,19 @@ func TestLoopbackService(t *testing.T) {
 		t.Fatal("an unresolved destination must not be mistaken for loopback")
 	}
 }
+
+// TestPeekableFirstByte pins the other half: a proxy client that says nothing
+// must not be waited for. The peek is only there to keep a TUN packet whole.
+func TestPeekableFirstByte(t *testing.T) {
+	if !peekableFirstByte(&C.Metadata{Type: C.TUN}) {
+		t.Fatal("a TUN stream arrives with its first packet")
+	}
+	for _, typ := range []C.Type{C.HTTPS, C.SOCKS5, C.VLESS, C.INNER} {
+		if peekableFirstByte(&C.Metadata{Type: typ}) {
+			t.Fatalf("a %v stream may stay silent; it must not be waited for", typ)
+		}
+	}
+	if peekableFirstByte(nil) {
+		t.Fatal("a stream with no metadata must not be waited for")
+	}
+}
