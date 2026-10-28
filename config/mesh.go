@@ -398,7 +398,7 @@ func buildMeshDomainRules(domains map[string]string) []string {
 	// loopback. Without these, that destination falls through to the catch-all
 	// rule and is sent out through a proxy - the stream then waits on a remote
 	// server for a service that was local all along.
-	rules = append(rules, "IPCIDR,127.0.0.0/8,DIRECT", "IPCIDR,::1/128,DIRECT")
+	rules = append(rules, "IP-CIDR,127.0.0.0/8,DIRECT", "IP-CIDR6,::1/128,DIRECT")
 	for _, domain := range names {
 		rules = append(rules, "DOMAIN,"+domain+","+meshEntryName)
 	}

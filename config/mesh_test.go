@@ -828,7 +828,7 @@ func TestExpandMeshWritesAnEntryAndRulesForTheDevicesDomains(t *testing.T) {
 	assert.Equal(t, meshDefaultPort, entry["port"])
 
 	// Sorted, so the rules read the same on every device of the mesh.
-	assert.Equal(t, []string{"IPCIDR,127.0.0.0/8,DIRECT", "IPCIDR,::1/128,DIRECT", "DOMAIN,gt7.lan,mesh", "DOMAIN,pc.lan,mesh"}, rawCfg.Rule)
+	assert.Equal(t, []string{"IP-CIDR,127.0.0.0/8,DIRECT", "IP-CIDR6,::1/128,DIRECT", "DOMAIN,gt7.lan,mesh", "DOMAIN,pc.lan,mesh"}, rawCfg.Rule)
 	// The device without a domain is still dialled by name; only its domain
 	// rule is missing.
 	assert.Equal(t, "phone", rawCfg.Proxy[2]["name"])
@@ -846,7 +846,7 @@ func TestExpandMeshPutsTheDomainRulesFirst(t *testing.T) {
 	if err := expandMesh(rawCfg); err != nil {
 		t.Fatal(err)
 	}
-	assert.Equal(t, []string{"IPCIDR,127.0.0.0/8,DIRECT", "IPCIDR,::1/128,DIRECT", "DOMAIN,pc.lan,mesh", "MATCH,DIRECT"}, rawCfg.Rule)
+	assert.Equal(t, []string{"IP-CIDR,127.0.0.0/8,DIRECT", "IP-CIDR6,::1/128,DIRECT", "DOMAIN,pc.lan,mesh", "MATCH,DIRECT"}, rawCfg.Rule)
 }
 
 // A device without a domain grows neither an entry nor a rule: an old profile
@@ -883,7 +883,7 @@ func TestExpandMeshDropsAnInvalidDomainRatherThanTheProfile(t *testing.T) {
 		t.Fatalf("an odd domain failed the parse: %v", err)
 	}
 	// The device stays; only its rule is gone.
-	assert.Equal(t, []string{"IPCIDR,127.0.0.0/8,DIRECT", "IPCIDR,::1/128,DIRECT", "DOMAIN,gt7.lan,mesh"}, rawCfg.Rule)
+	assert.Equal(t, []string{"IP-CIDR,127.0.0.0/8,DIRECT", "IP-CIDR6,::1/128,DIRECT", "DOMAIN,gt7.lan,mesh"}, rawCfg.Rule)
 	assert.Equal(t, map[string]string{"gt7.lan": "0f1e2d3c4b5a"}, rawCfg.Proxy[len(rawCfg.Proxy)-1]["domains"])
 }
 
