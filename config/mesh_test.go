@@ -1070,3 +1070,47 @@ func TestExpandMeshWritesRulesTheParserAccepts(t *testing.T) {
 		}
 	}
 }
+
+// A listener that accepts only itself refuses every peer the mesh exists for.
+// The users can only be answered once the devices are known, so this pins that
+// the derived listener carries this device and every peer it was told about.
+func TestExpandMeshListenerAcceptsEveryPeer(t *testing.T) {
+	// A profile that writes neither half - the shape the hub hands out - takes
+	// both from the mesh's own derivation, and the device list is what says who
+	// may connect.
+	stubDiscovery(t, nil, errors.New("the directory must not be read during the parse"))
+	rawCfg := &RawConfig{
+		Mesh: &RawMesh{
+			DirectoryURL: "https://hub.example",
+			DirectoryID:  "this-device",
+			Devices: []RawMeshDevice{
+				{Name: "PC", ID: "a1b2c3d4e5f6", Domain: "pc.lan", UUID: "11111111-1111-1111-1111-111111111111"},
+				{Name: "gt7", ID: "0f1e2d3c4b5a", Domain: "gt7.lan", UUID: "22222222-2222-2222-2222-222222222222"},
+			},
+		},
+	}
+
+	if err := expandMesh(rawCfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawCfg.Listeners) != 1 {
+		t.Fatalf("expanded %d listeners, want one", len(rawCfg.Listeners))
+	}
+	users, _ := rawCfg.Listeners[0]["users"].([]any)
+	if len(users) < 2 {
+		t.Fatalf("the listener accepts %d user(s), want every peer it was told about", len(users))
+	}
+	accepted := map[string]bool{}
+	for _, user := range users {
+		if entry, ok := user.(map[string]any); ok {
+			if uuid, ok := entry["uuid"].(string); ok {
+				accepted[uuid] = true
+			}
+		}
+	}
+	for _, want := range []string{"11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"} {
+		if !accepted[want] {
+			t.Fatalf("the listener does not accept %s", want)
+		}
+	}
+}

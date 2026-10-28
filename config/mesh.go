@@ -272,12 +272,23 @@ func expandMesh(rawCfg *RawConfig) error {
 	if err != nil {
 		return err
 	}
+	// The users a listener accepts are the devices the mesh holds, so they can
+	// only be answered after the devices are: deriving them with the protocol
+	// left the list holding this device alone, and a listener that accepts
+	// nobody else refuses every peer the mesh exists to reach.
+
 
 	// The listener half is optional: a profile that writes its listeners by
 	// hand keeps doing that, and a profile written before this half existed
 	// keeps loading.
 	if meshListenerDefined(mesh) {
 		listener := buildMeshListener(mesh.Listener, port)
+		// Who may connect can only be answered once the devices are known: a
+		// listener that carries this device alone refuses every peer.
+		if _, written := listener["users"]; !written {
+			own, _, _ := meshTransportIdentity(mesh)
+			listener["users"] = meshListenerUsers(mesh, own)
+		}
 		rawCfg.Listeners = append(rawCfg.Listeners, listener)
 		// A listener that never binds leaves a device that reports itself at a
 		// port nobody can open, and nothing in the log would say so: the peers
@@ -470,7 +481,10 @@ func meshTransportIdentity(mesh *RawMesh) (uuid, decryption, encryption string) 
 // and a listener that accepted only its own user would refuse its peers - so it
 // accepts exactly the devices the directory listed.
 func meshListenerUsers(mesh *RawMesh, own string) []any {
-	users := []any{map[string]any{"uuid": own}}
+	users := make([]any, 0, len(mesh.Devices)+1)
+	if own = strings.TrimSpace(own); own != "" {
+		users = append(users, map[string]any{"uuid": own})
+	}
 	if strings.TrimSpace(mesh.DirectoryToken) != "" {
 		return users
 	}
@@ -498,7 +512,6 @@ func meshDerivedProtocols(mesh *RawMesh) (proxy, listener map[string]any) {
 			"encryption": encryption,
 		}, map[string]any{
 			"type":       meshDerivedProtocol,
-			"users":      meshListenerUsers(mesh, uuid),
 			"decryption": decryption,
 		}
 }
