@@ -105,14 +105,14 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateDNS(cfg.DNS, cfg.General.IPv6)
 	updateNTP(cfg.NTP) // initialize NTP after DNS because an NTP server may be a hostname.
 	// The listeners a profile declares belong to the profile, not to the app
-	// that happened to start this process: a standalone core - the ONT, a
-	// server - has no app to open them, and a listener that never binds makes a
-	// device nobody can reach while every log line says it is running.
-	//
-	// Only the inbound listeners are patched here. The proxy ports stay the
-	// app's business: binding them from inside the apply made the app's own
-	// startListener wait on a port this core had already taken.
-	listener.PatchInboundListeners(cfg.Listeners, tunnel.Tunnel, true)
+	// that happened to start this process - but only a core without an app is
+	// the one that has to open them. A standalone core (the ONT, a server)
+	// sets MESH_STANDALONE=1 in its init script; an app-driven core leaves the
+	// listeners to the app's startListener, which binds the same profile and
+	// would otherwise fight this one for the port.
+	if os.Getenv("MESH_STANDALONE") == "1" {
+		listener.PatchInboundListeners(cfg.Listeners, tunnel.Tunnel, true)
+	}
 	//updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)

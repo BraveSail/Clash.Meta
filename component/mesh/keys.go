@@ -18,15 +18,13 @@ import (
 // transport accepts.
 const EncryptionPrefix = "mlkem768x25519plus.native"
 
-// ClientHandshake is the VLESS encryption handshake a mesh client performs
-// before it has anything to send.
+// ClientHandshake is the VLESS encryption handshake a mesh client performs.
 //
-// It is 1-RTT on purpose. Under 0-RTT a client's first flight carries payload,
-// so a client with nothing to say yet - a proxy asking a peer for a service that
-// greets first - never opens the stream in a way the peer can answer: the
-// listener accepts, dials, and the greeting has nowhere to go. A round trip is
-// cheaper than a stream that opens and stays silent.
-const ClientHandshake = "1rtt"
+// Upstream's 0-RTT: it carries the client's first flight with its payload, which
+// is what nearly every client the mesh carries does. A client that opens a
+// stream and says nothing yet is a separate matter, handled where the stream is
+// dialled - not by giving every dial a round trip it does not need.
+const ClientHandshake = "0rtt"
 
 // ClientEncryption is the value a peer dialling this device must use: the public
 // key under the scheme and handshake both halves agree on.
