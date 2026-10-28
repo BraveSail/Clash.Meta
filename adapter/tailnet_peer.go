@@ -265,7 +265,12 @@ func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.
 		return nil, err
 	}
 	noteDialAttemptToDisk(requestedHost(metadata), metadata.DstPort, key)
-	conn, err := proxy.DialContext(ctx, metadata)
+	// What crosses the mesh is the service, not the name. The peer already
+	// knows it is the device the name points at, so the destination is its own
+	// loopback: sending the name instead would hand it back to its own rules,
+	// where the same name resolves to the mesh again and the stream waits
+	// forever on a connection to itself.
+	conn, err := proxy.DialContext(ctx, peerServiceMetadata(metadata))
 	if err != nil {
 		t.invalidate()
 		t.noteDialFailure(key, err)
@@ -676,4 +681,16 @@ func noteDialAttemptToDisk(host string, port uint16, key string) {
 	}
 	_, _ = file.WriteString(line)
 	_ = file.Close()
+}
+
+// peerServiceMetadata is the destination a peer is asked for: the port the
+// caller wanted, served on the peer's own loopback.
+func peerServiceMetadata(metadata *C.Metadata) *C.Metadata {
+	if metadata == nil {
+		return nil
+	}
+	local := *metadata
+	local.Host = "127.0.0.1"
+	local.DstIP = netip.MustParseAddr("127.0.0.1")
+	return &local
 }
