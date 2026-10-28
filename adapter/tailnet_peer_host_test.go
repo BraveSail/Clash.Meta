@@ -56,11 +56,11 @@ func (h *hostRelay) ProxyInfo() C.ProxyInfo {
 }
 
 // A rule that points at the mesh has to be answered by the device the requested
-// name belongs to. The outbound itself is chosen by the rule before anything
-// knows which device was asked for, so the name can only travel on the
-// connection's metadata; this pins that it is still there when the inner proxy
-// is dialled.
-func TestTailnetPeerDialCarriesTheRequestedHost(t *testing.T) {
+// name belongs to. What that device is asked for is its own service, not the
+// name: a name sent across the mesh would meet the same rules on the other side
+// and resolve back to the mesh, so the peer would dial itself and the stream
+// would wait instead of failing. This pins the destination the inner proxy sees.
+func TestTailnetPeerDialAsksThePeerForItsOwnService(t *testing.T) {
 	relay := &hostRelay{received: make(chan *C.Metadata, 1)}
 
 	// A directory that answers with a peer which is not this node: the dial
@@ -96,8 +96,11 @@ func TestTailnetPeerDialCarriesTheRequestedHost(t *testing.T) {
 
 	select {
 	case metadata := <-relay.received:
-		if metadata.Host != "pc.lan" {
-			t.Fatalf("the inner proxy was handed host %q, want the requested name", metadata.Host)
+		if metadata.Host != "127.0.0.1" {
+			t.Fatalf("the inner proxy was handed host %q, want the peer's loopback", metadata.Host)
+		}
+		if metadata.DstPort != 23333 {
+			t.Fatalf("the inner proxy was handed port %d, want the requested 23333", metadata.DstPort)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the dial never reached the inner proxy")
