@@ -500,6 +500,19 @@ func handleUDPConn(packet C.PacketAdapter) {
 	sender.Send(packet) // nonblocking
 }
 
+// sniffableDestination reports whether sniffing a stream can tell us anything
+// we do not already know.
+//
+// A stream addressed to this device's own loopback is a service request from a
+// peer, not a name that needs discovering: there is no domain behind 127.0.0.1.
+// Sniffing it means waiting for the client to speak first, and a protocol whose
+// server speaks first - sshd's banner, SMTP's greeting, a database's handshake -
+// then never gets dialled at all. That is what made a mesh stream open and stay
+// silent while every log said the connection had been established.
+func sniffableDestination(metadata *C.Metadata) bool {
+	return metadata != nil && !metadata.DstIP.IsLoopback()
+}
+
 func handleTCPConn(connCtx C.ConnContext) {
 	if !isHandle(connCtx.Metadata().Type) {
 		_ = connCtx.Conn().Close()
@@ -525,7 +538,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 
 	conn := connCtx.Conn()
 	conn.ResetPeeked() // reset before sniffer
-	if sniffingEnable && snifferDispatcher.Enable() {
+	if sniffingEnable && snifferDispatcher.Enable() && sniffableDestination(metadata) {
 		// Try to sniff a domain when `preHandleMetadata` failed, this is usually
 		// caused by a "Fake DNS record missing" error when enhanced-mode is fake-ip.
 		if snifferDispatcher.TCPSniff(conn, metadata) {
