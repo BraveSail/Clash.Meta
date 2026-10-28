@@ -7,35 +7,39 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 )
 
-// TestSniffableDestination pins the rule a mesh stream depends on: a stream
-// addressed to this device's own loopback is a service request, and waiting for
-// the client to speak first is what made every server-speaks-first protocol
-// (sshd's banner, SMTP's greeting) hang behind the proxy.
-func TestSniffableDestination(t *testing.T) {
+// TestLoopbackService pins the rule a mesh stream depends on.
+//
+// A peer asks this device for a service on its own loopback, and the destination
+// crosses already resolved. Sniffing it or waiting for its first byte both stall
+// every protocol whose server speaks first - sshd's banner, SMTP's greeting -
+// leaving a stream that opens, says nothing and times out while both ends report
+// the connection as established.
+func TestLoopbackService(t *testing.T) {
 	cases := []struct {
 		name string
 		addr string
 		want bool
 	}{
-		{"loopback", "127.0.0.1", false},
-		{"loopback ipv6", "::1", false},
-		{"public v4", "1.1.1.1", true},
-		{"public v6", "2606:4700:4700::1111", true},
+		{"loopback", "127.0.0.1", true},
+		{"loopback ipv6", "::1", true},
+		{"public v4", "1.1.1.1", false},
+		{"public v6", "2606:4700:4700::1111", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			metadata := &C.Metadata{DstIP: netip.MustParseAddr(c.addr)}
-			if got := sniffableDestination(metadata); got != c.want {
-				t.Fatalf("sniffableDestination(%s) = %v, want %v", c.addr, got, c.want)
+			if got := loopbackService(metadata); got != c.want {
+				t.Fatalf("loopbackService(%s) = %v, want %v", c.addr, got, c.want)
 			}
 		})
 	}
 
-	if sniffableDestination(nil) {
-		t.Fatal("a stream with no metadata cannot be sniffed")
+	if loopbackService(nil) {
+		t.Fatal("a stream with no metadata is not a service on this device")
 	}
-	// A destination still unnamed is exactly what sniffing is for.
-	if !sniffableDestination(&C.Metadata{}) {
-		t.Fatal("an unresolved destination must still be sniffable")
+	// An unresolved destination is an ordinary stream: it may be sniffed, and
+	// its first byte may be waited for.
+	if loopbackService(&C.Metadata{}) {
+		t.Fatal("an unresolved destination must not be mistaken for loopback")
 	}
 }

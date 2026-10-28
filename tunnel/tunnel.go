@@ -500,17 +500,18 @@ func handleUDPConn(packet C.PacketAdapter) {
 	sender.Send(packet) // nonblocking
 }
 
-// sniffableDestination reports whether sniffing a stream can tell us anything
-// we do not already know.
+// loopbackService reports whether this stream is a request for a service on
+// this device itself.
 //
-// A stream addressed to this device's own loopback is a service request from a
-// peer, not a name that needs discovering: there is no domain behind 127.0.0.1.
-// Sniffing it means waiting for the client to speak first, and a protocol whose
-// server speaks first - sshd's banner, SMTP's greeting, a database's handshake -
-// then never gets dialled at all. That is what made a mesh stream open and stay
-// silent while every log said the connection had been established.
-func sniffableDestination(metadata *C.Metadata) bool {
-	return metadata != nil && !metadata.DstIP.IsLoopback()
+// That is what a mesh peer sends: the destination crosses as the peer's own
+// loopback, because the name had already been resolved by the device that asked
+// for it. Two things follow, and both were bugs before they were rules: there is
+// no domain to sniff behind 127.0.0.1, and there is no first byte to peek at,
+// since a service may well speak before its client does. Waiting for a byte that
+// never comes left sshd's banner, SMTP's greeting and every database handshake
+// undialled, on a connection both ends reported as established.
+func loopbackService(metadata *C.Metadata) bool {
+	return metadata != nil && metadata.DstIP.IsLoopback()
 }
 
 func handleTCPConn(connCtx C.ConnContext) {
@@ -538,7 +539,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 
 	conn := connCtx.Conn()
 	conn.ResetPeeked() // reset before sniffer
-	if sniffingEnable && snifferDispatcher.Enable() && sniffableDestination(metadata) {
+	if sniffingEnable && snifferDispatcher.Enable() && !loopbackService(metadata) {
 		// Try to sniff a domain when `preHandleMetadata` failed, this is usually
 		// caused by a "Fake DNS record missing" error when enhanced-mode is fake-ip.
 		if snifferDispatcher.TCPSniff(conn, metadata) {
@@ -555,7 +556,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 	}
 
 	peekMutex := sync.Mutex{}
-	if !conn.Peeked() {
+	if !conn.Peeked() && !loopbackService(metadata) {
 		peekMutex.Lock()
 		go func() {
 			defer peekMutex.Unlock()
