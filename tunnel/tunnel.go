@@ -542,6 +542,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
+	noteStageToDisk("start", metadata)
 
 	preHandleFailed := false
 	if err := preHandleMetadata(metadata); err != nil {
@@ -583,6 +584,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 		log.Warnln("[Metadata] parse failed: %s", err.Error())
 		return
 	}
+	noteStageToDisk("resolved:"+proxy.Name(), metadata)
 
 	dialMetadata := metadata
 	if len(metadata.Host) > 0 {
@@ -637,6 +639,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 	if err != nil {
 		return
 	}
+	noteStageToDisk("dialed", metadata)
 	logMetadata(metadata, rule, remoteConn)
 
 	remoteConn = statistic.NewTCPTracker(remoteConn, statistic.DefaultManager, metadata, rule, int64(peekLen), 0, true)
@@ -648,7 +651,9 @@ func handleTCPConn(connCtx C.ConnContext) {
 	peekMutex.Lock()
 	defer peekMutex.Unlock()
 	_ = conn.SetReadDeadline(time.Time{}) // reset
+	noteStageToDisk("forward", metadata)
 	handleSocket(conn, remoteConn)
+	noteStageToDisk("closed", metadata)
 }
 
 func logMetadataErr(metadata *C.Metadata, rule C.Rule, proxy C.ProxyAdapter, err error) {
