@@ -299,6 +299,15 @@ func (v *Vless) streamConnContext(ctx context.Context, c net.Conn, metadata *C.M
 	}
 	if err != nil {
 		conn = nil
+		return
+	}
+	// The request goes out now, not with the first payload: a client that has
+	// nothing to say yet still has to say where it wants to go, or the peer
+	// has nothing to answer.
+	if handshaker, ok := conn.(interface{ Handshake() error }); ok {
+		if err = handshaker.Handshake(); err != nil {
+			conn = nil
+		}
 	}
 	return
 }

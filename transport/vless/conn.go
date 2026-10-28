@@ -155,6 +155,25 @@ func (vc *Conn) NeedHandshake() bool {
 	return !vc.sent
 }
 
+// Handshake sends the request now instead of with the first payload.
+//
+// The request is what tells the peer where to dial, and the peer answers it
+// before the client says anything - a service that greets first (sshd, SMTP, a
+// database) replies the moment the request arrives. Waiting for a payload to
+// carry it means a client that has nothing to say yet never sends the request at
+// all: the peer's listener accepts the TCP connection and reads zero bytes, and
+// the dial sits there until it times out.
+func (vc *Conn) Handshake() error {
+	if vc.sent {
+		return nil
+	}
+	if err := vc.sendRequest(nil); err != nil {
+		return err
+	}
+	vc.sent = true
+	return nil
+}
+
 // newConn return a Conn instance
 func newConn(conn net.Conn, client *Client, dst *DstAddr) (net.Conn, error) {
 	c := &Conn{
