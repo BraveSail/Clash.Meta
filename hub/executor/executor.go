@@ -109,11 +109,10 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	// server - has no app to open them, and a listener that never binds makes a
 	// device nobody can reach while every log line says it is running.
 	//
-	// This is the same call the app makes, made by the core that read the
-	// config. Inbound listeners are patched idempotently, and the port listeners
-	// are recreated the same way an app-toggle would, so an app that also asks
-	// for them lands on the same result instead of a second bind.
-	updateListeners(cfg.General, cfg.Listeners, true)
+	// Only the inbound listeners are patched here. The proxy ports stay the
+	// app's business: binding them from inside the apply made the app's own
+	// startListener wait on a port this core had already taken.
+	listener.PatchInboundListeners(cfg.Listeners, tunnel.Tunnel, true)
 	//updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
