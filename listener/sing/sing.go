@@ -146,6 +146,10 @@ func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, meta
 	inbound.ApplyAdditions(cMetadata, h.Additions...)
 	inbound.ApplyAdditions(cMetadata, getAdditions(ctx)...)
 
+	if h.Type == C.VLESS {
+		noteIncomingToDisk(metadata.Destination.String(), cMetadata)
+	}
+
 	h.Tunnel.HandleTCPConn(conn, cMetadata) // this goroutine must exit after conn unused
 	return nil
 }

@@ -265,12 +265,14 @@ func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.
 		return nil, err
 	}
 	noteDialAttemptToDisk(requestedHost(metadata), metadata.DstPort, key)
+	target := peerServiceMetadata(metadata)
+	noteSendToDisk(metadata, target)
 	// What crosses the mesh is the service, not the name. The peer already
 	// knows it is the device the name points at, so the destination is its own
 	// loopback: sending the name instead would hand it back to its own rules,
 	// where the same name resolves to the mesh again and the stream waits
 	// forever on a connection to itself.
-	conn, err := proxy.DialContext(ctx, peerServiceMetadata(metadata))
+	conn, err := proxy.DialContext(ctx, target)
 	if err != nil {
 		t.invalidate()
 		t.noteDialFailure(key, err)
@@ -675,6 +677,28 @@ func noteDialAttemptToDisk(host string, port uint16, key string) {
 		return
 	}
 	line := fmt.Sprintf("%s  try  %s:%d  peer=%s\n", time.Now().Format(time.RFC3339), host, port, key)
+	file, openErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if openErr != nil {
+		return
+	}
+	_, _ = file.WriteString(line)
+	_ = file.Close()
+}
+
+// noteSendToDisk writes what a peer is actually asked to open. A name that
+// resolves here and a name that resolves there are two different requests, and
+// when a stream opens and stays silent the only question worth asking is what
+// crossed the wire.
+func noteSendToDisk(asked, sent *C.Metadata) {
+	path := dialFailureLog()
+	if path == "" || asked == nil || sent == nil {
+		return
+	}
+	line := fmt.Sprintf("%s  send  asked=%q/%v/%d  sent=%q/%v/%d  type=%v\n",
+		time.Now().Format(time.RFC3339),
+		asked.Host, asked.DstIP, asked.DstPort,
+		sent.Host, sent.DstIP, sent.DstPort,
+		asked.Type)
 	file, openErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if openErr != nil {
 		return
