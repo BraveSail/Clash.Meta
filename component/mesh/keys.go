@@ -18,6 +18,22 @@ import (
 // transport accepts.
 const EncryptionPrefix = "mlkem768x25519plus.native"
 
+// ClientHandshake is the VLESS encryption handshake a mesh client performs
+// before it has anything to send.
+//
+// It is 1-RTT on purpose. Under 0-RTT a client's first flight carries payload,
+// so a client with nothing to say yet - a proxy asking a peer for a service that
+// greets first - never opens the stream in a way the peer can answer: the
+// listener accepts, dials, and the greeting has nowhere to go. A round trip is
+// cheaper than a stream that opens and stays silent.
+const ClientHandshake = "1rtt"
+
+// ClientEncryption is the value a peer dialling this device must use: the public
+// key under the scheme and handshake both halves agree on.
+func ClientEncryption(password string) string {
+	return EncryptionPrefix + "." + ClientHandshake + "." + password
+}
+
 // keyFileName is where this device's key material lives - in the core's own
 // home, never in a profile and never in the app: one profile runs on every
 // device of the mesh, and a key written into it would be everyone's key.
@@ -104,7 +120,7 @@ func deriveKeys(stored storedKeys) (DeviceKeys, error) {
 	return DeviceKeys{
 		UUID:       deviceUUID(password),
 		Decryption: EncryptionPrefix + ".600s." + privateKey,
-		Encryption: EncryptionPrefix + ".0rtt." + password,
+		Encryption: ClientEncryption(password),
 		Signing:    signing,
 	}, nil
 }

@@ -52,7 +52,7 @@ func TestTheKeyHasTheShapeTheTransportExpects(t *testing.T) {
 	if !strings.HasPrefix(keys.Decryption, EncryptionPrefix+".600s.") {
 		t.Fatalf("decryption = %q", keys.Decryption)
 	}
-	if !strings.HasPrefix(keys.Encryption, EncryptionPrefix+".0rtt.") {
+	if !strings.HasPrefix(keys.Encryption, EncryptionPrefix+"."+ClientHandshake+".") {
 		t.Fatalf("encryption = %q", keys.Encryption)
 	}
 	// A UUID: 8-4-4-4-12 lower-case hex.

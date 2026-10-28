@@ -634,7 +634,9 @@ func TestExpandMeshDerivesTheEncryptionBothEndsSpeak(t *testing.T) {
 	// The values have to parse as the core parses them, not merely be non
 	// empty strings.
 	assert.Regexp(t, `^mlkem768x25519plus\.native\.600s\.[A-Za-z0-9_-]{43}$`, decryption)
-	assert.Regexp(t, `^mlkem768x25519plus\.native\.0rtt\.[A-Za-z0-9_-]{43}$`, encryptionValue)
+	// 1-RTT, not 0-RTT: a client with nothing to send yet must still be able
+	// to read what the service it asked for says first.
+	assert.Regexp(t, `^mlkem768x25519plus\.native\.1rtt\.[A-Za-z0-9_-]{43}$`, encryptionValue)
 }
 
 // The pair is what lets two devices of one mesh talk: every device holds the
@@ -977,7 +979,7 @@ func TestAMeshWithoutATokenUsesTheDevicesOwnKeys(t *testing.T) {
 		t.Fatalf("uuid = %q", uuid)
 	}
 	encryption, _ := inner["encryption"].(string)
-	if !strings.HasPrefix(encryption, meshident.EncryptionPrefix+".0rtt.") {
+	if !strings.HasPrefix(encryption, meshident.EncryptionPrefix+"."+meshident.ClientHandshake+".") {
 		t.Fatalf("encryption = %q", encryption)
 	}
 }

@@ -547,8 +547,14 @@ func meshDecryptionValue(privateKey string) string {
 
 // meshEncryptionValue is the client half as the outbound reads it: the public
 // key the server's private half corresponds to, under the same scheme.
+//
+// The handshake is 1-RTT, not 0-RTT. Under 0-RTT the client's first flight only
+// leaves when it has payload to carry, so a stream that opens before its client
+// speaks - a peer asking for a service that greets first - stays undelivered:
+// the listener accepts, dials, and the greeting never comes back. 1-RTT costs a
+// round trip and makes the stream readable in both directions from the dial.
 func meshEncryptionValue(password string) string {
-	return meshEncryptionPrefix + ".0rtt." + password
+	return meshident.ClientEncryption(password)
 }
 
 // meshPeers answers the devices of a mesh: the ones the block lists by hand, or
