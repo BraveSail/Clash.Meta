@@ -218,8 +218,5 @@ func closeAllLocalCoon(lAddr string) {
 }
 
 func handleSocket(inbound, outbound net.Conn) {
-	in := newByteCounter(inbound)
-	out := newByteCounter(outbound)
-	N.Relay(in, out)
-	noteBytesToDisk(in.value(), out.value())
+	N.Relay(inbound, outbound)
 }
