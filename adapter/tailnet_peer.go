@@ -264,6 +264,7 @@ func (t *TailnetPeer) DialContext(ctx context.Context, metadata *C.Metadata) (C.
 		noteDialFailureToDisk(requestedHost(metadata), metadata.DstPort, err)
 		return nil, err
 	}
+	noteDialAttemptToDisk(requestedHost(metadata), metadata.DstPort, key)
 	conn, err := proxy.DialContext(ctx, metadata)
 	if err != nil {
 		t.invalidate()
@@ -655,6 +656,20 @@ func noteDialFailureToDisk(host string, port uint16, err error) {
 		return
 	}
 	line := fmt.Sprintf("%s  dial %s:%d  %v\n", time.Now().Format(time.RFC3339), host, port, err)
+	file, openErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if openErr != nil {
+		return
+	}
+	_, _ = file.WriteString(line)
+	_ = file.Close()
+}
+
+func noteDialAttemptToDisk(host string, port uint16, key string) {
+	path := dialFailureLog()
+	if path == "" {
+		return
+	}
+	line := fmt.Sprintf("%s  try  %s:%d  peer=%s\n", time.Now().Format(time.RFC3339), host, port, key)
 	file, openErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if openErr != nil {
 		return
