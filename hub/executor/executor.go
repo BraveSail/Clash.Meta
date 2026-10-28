@@ -104,7 +104,13 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateGeneral(cfg.General, true)
 	updateDNS(cfg.DNS, cfg.General.IPv6)
 	updateNTP(cfg.NTP) // initialize NTP after DNS because an NTP server may be a hostname.
-	//updateListeners(cfg.General, cfg.Listeners, force)
+	// The listeners a profile declares belong to the profile, not to the app
+	// that happened to start this process: a standalone core - the ONT, a
+	// server - has no app to open them, and a mesh listener that never binds
+	// makes a device nobody can reach while every log line says it is running.
+	// Patching is idempotent, so an app that also patches them does not end up
+	// with a second bind, and a bind that fails is said out loud.
+	listener.PatchInboundListeners(cfg.Listeners, tunnel.Tunnel, true)
 	//updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
