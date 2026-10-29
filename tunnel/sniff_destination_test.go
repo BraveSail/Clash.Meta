@@ -44,15 +44,16 @@ func TestLoopbackService(t *testing.T) {
 	}
 }
 
-// TestPeekableFirstByte pins the other half: a proxy client that says nothing
-// must not be waited for. The peek is only there to keep a TUN packet whole.
+// TestPeekableFirstByte pins the half that costs a round trip when it is wrong:
+// a proxy client's first bytes are what a vmess or vless request rides in on, so
+// every stream is waited for - briefly, and beside the dial.
 func TestPeekableFirstByte(t *testing.T) {
 	if !peekableFirstByte(&C.Metadata{Type: C.TUN}) {
 		t.Fatal("a TUN stream arrives with its first packet")
 	}
 	for _, typ := range []C.Type{C.HTTPS, C.SOCKS5, C.VLESS, C.INNER} {
-		if peekableFirstByte(&C.Metadata{Type: typ}) {
-			t.Fatalf("a %v stream may stay silent; it must not be waited for", typ)
+		if !peekableFirstByte(&C.Metadata{Type: typ}) {
+			t.Fatalf("a %v stream carries early data and must be waited for", typ)
 		}
 	}
 	if peekableFirstByte(nil) {

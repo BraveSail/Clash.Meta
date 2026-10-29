@@ -516,14 +516,13 @@ func loopbackService(metadata *C.Metadata) bool {
 
 // peekableFirstByte reports whether waiting for the client's first byte is safe.
 //
-// The peek exists to keep a TUN client's first packet whole: it is folded into
-// the first write to the remote, saving a packet. It must never stand in front of
-// the forward, because a proxy client is free to say nothing at all - an SSH
-// client happens to speak first, but a server-speaks-first protocol behind
-// CONNECT then waits forever on a banner already sitting in the peer's socket.
-// Only a TUN stream is known to arrive with data.
+// The peek exists to keep a client's first bytes whole: they are folded into the
+// first write to the remote, which is what lets a vmess or vless request ride
+// the handshake instead of costing a round trip. It must never stand in front of
+// the forward for long, because a proxy client is free to say nothing at all -
+// the wait is bounded at 200ms and runs beside the dial, never instead of it.
 func peekableFirstByte(metadata *C.Metadata) bool {
-	return metadata != nil && metadata.Type == C.TUN
+	return metadata != nil
 }
 
 func handleTCPConn(connCtx C.ConnContext) {
