@@ -652,7 +652,11 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 		noteCoreEvent("inbound %s up on %s", name, newListener.Address())
 	}
 
-	if dropOld {
+	// An empty map is a caller that does not manage listeners - an app pushing
+	// a config it did not read them from - and dropping what the profile
+	// declared on its behalf is how a device loses the listener its peers dial
+	// while every log line still says it is running.
+	if dropOld && len(newListenerMap) > 0 {
 		for name, oldListener := range inboundListeners {
 			if _, ok := newListenerMap[name]; !ok {
 				_ = oldListener.Close()
