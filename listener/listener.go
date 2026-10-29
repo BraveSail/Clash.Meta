@@ -444,11 +444,20 @@ func ReCreateMixed(port int, tunnel C.Tunnel) {
 	mixedMux.Lock()
 	defer mixedMux.Unlock()
 
+	noteCoreEvent("mixed port asked for %d", port)
+
 	var err error
 	defer func() {
 		if err != nil {
 			log.Errorln("Start Mixed(http+socks) server error: %s", err.Error())
+			noteCoreEvent("mixed %s failed: %v", genAddr(bindAddress, port, allowLan), err)
+			return
 		}
+		if portIsZero(genAddr(bindAddress, port, allowLan)) {
+			noteCoreEvent("mixed stopped: no port asked for")
+			return
+		}
+		noteCoreEvent("mixed up on %s", genAddr(bindAddress, port, allowLan))
 	}()
 
 	addr := genAddr(bindAddress, port, allowLan)
@@ -636,9 +645,11 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 		}
 		if err := newListener.Listen(tunnel); err != nil {
 			log.Errorln("Listener %s listen err: %s", name, err.Error())
+			noteCoreEvent("inbound %s failed: %v", name, err)
 			continue
 		}
 		inboundListeners[name] = newListener
+		noteCoreEvent("inbound %s up on %s", name, newListener.Address())
 	}
 
 	if dropOld {
@@ -646,6 +657,7 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 			if _, ok := newListenerMap[name]; !ok {
 				_ = oldListener.Close()
 				delete(inboundListeners, name)
+				noteCoreEvent("inbound %s closed by a listener update", name)
 			}
 		}
 	}
